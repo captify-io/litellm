@@ -10,6 +10,7 @@ stages:
   - test
   - sbom
   - package
+  - release-gate
   - deploy
 
 variables:
@@ -36,7 +37,7 @@ build-wheel:
     # litellm builds a Rust extension via maturin; it needs a C linker, and
     # maturin bootstraps its own Rust toolchain (requires rust-lang.org access).
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev
-    - python -m pip install --no-cache-dir "uv==0.8.19"
+    - python -m pip install --no-cache-dir "uv==0.11.7"
     - uv --version
   script:
     - uv build
@@ -62,18 +63,21 @@ build-image:
         --cache-from "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         --cache-from "$CI_REGISTRY_IMAGE:latest" \
         -f Dockerfile \
-        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" \
         --load \
         .
-    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
     - |
-      if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
-        docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" "$CI_REGISTRY_IMAGE:latest"
-        docker push "$CI_REGISTRY_IMAGE:latest"
-      fi
+      LITELLM_IMAGE=$(docker image inspect "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" --format '{{index .RepoDigests 0}}')
+      case "$LITELLM_IMAGE" in "$CI_REGISTRY_IMAGE"@sha256:*) ;; *) exit 1 ;; esac
+      printf 'LITELLM_IMAGE=%s\n' "$LITELLM_IMAGE" > release.env
   artifacts:
+    reports:
+      dotenv: release.env
     paths:
       - litellm_version.txt
+      - release.env
     expire_in: 1 week
   rules:
     - when: always
@@ -141,8 +145,11 @@ semgrep-sast:
 
 container_scanning:
   stage: test
+  before_script:
+    - 'test -n "$LITELLM_IMAGE"'
+    - export CS_IMAGE="$LITELLM_IMAGE"
   variables:
-    CS_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    CS_IMAGE: "$LITELLM_IMAGE"
     SECURE_LOG_LEVEL: debug
     CI_GITLAB_FIPS_MODE: "false"
   needs:
@@ -151,8 +158,7 @@ container_scanning:
     - job: dependency-scanning
       artifacts: true
       optional: true
-  dependencies:
-    - dependency-scanning
+  allow_failure: false
   artifacts:
     paths:
       - gl-container-scanning-report.json
@@ -317,8 +323,26 @@ package-documents:
   rules:
     - when: always
 
+security-release-gate:
+  stage: release-gate
+  image: alpine:3.22
+  needs:
+    - job: container_scanning
+      artifacts: true
+  before_script:
+    - apk add --no-cache bash jq
+  script:
+    - bash scripts/gate-container-vulnerabilities.sh gl-container-scanning-report.json
+
 .deploy_template:
   stage: deploy
+  needs:
+    - job: build-image
+      artifacts: true
+    - job: package-documents
+      artifacts: false
+    - job: security-release-gate
+      artifacts: false
   image:
     name: public.ecr.aws/aws-cli/aws-cli:2.17.59
     entrypoint: [""]
@@ -367,9 +391,10 @@ package-documents:
         [ "$STATUS" = "Online" ] || (echo "FATAL: $INSTANCE_ID not Online in SSM" && exit 1)
       done
 
+    - 'test -n "$LITELLM_BIND_ADDRESS" || (echo "FATAL: private bind address is required" && exit 1)'
     - ENV_FILE_B64=$(base64 -w 0 "$ENV_FILE")
     - |
-      if [ "${DEBUG_DEPLOY_PASSWORD_FLOW:-true}" = "true" ]; then
+      if [ "${DEBUG_DEPLOY_PASSWORD_FLOW:-false}" = "true" ]; then
         echo "DEBUG: DATABASE_PASSWORD is set: $([ -n "${DATABASE_PASSWORD:-}" ] && echo yes || echo no)"
         echo "DEBUG: DATABASE_PASSWORD_READ_REPLICA is set: $([ -n "${DATABASE_PASSWORD_READ_REPLICA:-}" ] && echo yes || echo no)"
         if [ -n "${DATABASE_PASSWORD:-}" ]; then
@@ -412,17 +437,18 @@ package-documents:
       #!/bin/bash
       set -euo pipefail
 
-      DOCKER_REGISTRY="$CI_REGISTRY_IMAGE"
-      IMAGE_VERSION="$CI_COMMIT_REF_SLUG"
+      DOCKER_REGISTRY="$CI_REGISTRY"
+      IMAGE_REPOSITORY="$CI_REGISTRY_IMAGE"
       DOCKER_USER="$CI_REGISTRY_USER"
       DOCKER_TOKEN="$CI_REGISTRY_PASSWORD"
-      DEBUG_DEPLOY_PASSWORD_FLOW="${DEBUG_DEPLOY_PASSWORD_FLOW:-true}"
+      DEBUG_DEPLOY_PASSWORD_FLOW="${DEBUG_DEPLOY_PASSWORD_FLOW:-false}"
       DB_PASSWORD_B64="$DATABASE_PASSWORD_B64"
       DB_PASSWORD_READ_REPLICA_B64="$DATABASE_PASSWORD_READ_REPLICA_B64"
       DB_PASSWORD_SHA256="$DATABASE_PASSWORD_SHA256"
       DB_PASSWORD_READ_REPLICA_SHA256="$DATABASE_PASSWORD_READ_REPLICA_SHA256"
 
-      IMAGE="\$DOCKER_REGISTRY:\$IMAGE_VERSION"
+      IMAGE="$LITELLM_IMAGE"
+      case "\$IMAGE" in "\$IMAGE_REPOSITORY"@sha256:*) ;; *) exit 1 ;; esac
 
       echo "Logging into Docker registry..."
       echo "\$DOCKER_TOKEN" | docker login --username "\$DOCKER_USER" --password-stdin "\$DOCKER_REGISTRY"
@@ -436,10 +462,29 @@ package-documents:
           fi
         }
 
-      echo "Stopping/removing existing litellm container if present..."
-      docker stop litellm 2>/dev/null || true
-      docker rm litellm 2>/dev/null || true
+      RELEASE_DIR="/var/lib/litellm/releases/$CI_PIPELINE_ID"
+      umask 077
+      mkdir -p "\$RELEASE_DIR"
+      test ! -f "\$RELEASE_DIR/previous.env"
+      cp -p /litellm.env "\$RELEASE_DIR/previous.env"
 
+      PREVIOUS="litellm-rollback-$CI_PIPELINE_ID"
+      SWITCH_STARTED=false
+      rollback() {
+        result=\$?
+        trap - EXIT
+        if [ "\$result" -ne 0 ]; then
+          cp -p "\$RELEASE_DIR/previous.env" /litellm.env
+          if [ "\$SWITCH_STARTED" = true ]; then
+            docker rm -f litellm >/dev/null 2>&1 || true
+            docker rename "\$PREVIOUS" litellm
+          fi
+          docker update --restart always litellm >/dev/null
+          docker start litellm >/dev/null
+        fi
+        exit "\$result"
+      }
+      trap rollback EXIT
       echo "Writing runtime environment file..."
       echo "$ENV_FILE_B64" | base64 -d > /litellm.env
       if [ "$DEBUG_DEPLOY_PASSWORD_FLOW" = "true" ]; then
@@ -493,6 +538,12 @@ package-documents:
       fi
       chmod 600 /litellm.env
 
+      docker inspect litellm >/dev/null
+      docker update --restart no litellm >/dev/null
+      docker stop --time 60 litellm >/dev/null
+      docker rename litellm "\$PREVIOUS"
+      SWITCH_STARTED=true
+
       echo "Running LiteLLM container on ${LITELLM_BIND_ADDRESS}:${LITELLM_HOST_PORT} -> ${LITELLM_CONTAINER_PORT}..."
       docker run \
         --name litellm \
@@ -522,28 +573,20 @@ package-documents:
         fi
       fi
 
-      #echo "Waiting for LiteLLM liveliness endpoint..."
-      #for i in {1..30}; do
-      #  if docker run --rm --network captify-net curlimages/curl:8.8.0 \
-      #    -fsS "http://litellm:${LITELLM_CONTAINER_PORT}/health/liveliness" >/dev/null; then
-      #    echo "LiteLLM is healthy."
-      #    break
-      #  fi
-      #  if [ "\$i" -eq 30 ]; then
-      #    echo "FATAL: LiteLLM failed health check"
-      #    docker logs --tail 200 litellm || true
-      #    exit 1
-      #  fi
-      #  sleep 2
-      #done
-
-      echo "Cleaning up old LiteLLM images to avoid disk pressure..."
-      docker images --format "{{.Repository}}:{{.Tag}}" \
-        | grep "^\$DOCKER_REGISTRY" \
-        | grep -v "^\$IMAGE\$" \
-        | xargs -r docker rmi --force || true
-
-      docker image prune -f
+      HEALTHY=false
+      test "\$(docker inspect litellm --format '{{.HostConfig.PortBindings}}')" != 'map[]'
+      for attempt in {1..90}; do
+        if curl --fail --silent --max-time 3 "http://${LITELLM_BIND_ADDRESS}:${LITELLM_HOST_PORT}/health/readiness" >/dev/null; then
+          HEALTHY=true
+          break
+        fi
+        sleep 2
+      done
+      [ "\$HEALTHY" = true ] || { echo 'FATAL: LiteLLM readiness failed; restoring previous container'; exit 1; }
+      [ "\$(docker inspect litellm --format '{{.Config.Image}}')" = "\$IMAGE" ]
+      docker inspect litellm --format '{{.Id}} {{.Config.Image}} {{.State.Status}}' > "\$RELEASE_DIR/deployment.txt"
+      trap - EXIT
+      echo 'LiteLLM readiness and immutable image verification passed; previous container retained for rollback'
       EOF
 
     - chmod +x deploy.sh
@@ -594,12 +637,14 @@ deploy-dev:
     AWS_ACCOUNT_ID: "$DEV_ACCOUNT_ID"
     EC2_IDS: "$DEV_INSTANCE_IDS"
     ENV_FILE: "$LITELLM_DEV_ENV"
+    LITELLM_BIND_ADDRESS: "$DEV_LITELLM_BIND_ADDRESS"
   environment:
     name: dev
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
     - when: never
 
 deploy-staging:
