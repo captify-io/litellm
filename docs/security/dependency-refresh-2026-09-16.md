@@ -1,6 +1,6 @@
 # Dependency security refresh, September 16, 2026
 
-The lockfiles now select GitPython 3.1.62, MLflow 3.16.0, Next.js and eslint-config-next 16.3.3, patched js-yaml, sharp, smol-toml, browserslist, ws, form-data and protobufjs versions, and Go gRPC 1.83.1. JavaScript overrides preserve the existing major line where multiple major lines occur. The cookbook installs this fork's current 1.100.0 release
+The lockfiles now select GitPython 3.1.62, MLflow 3.16.0, Next.js and eslint-config-next 16.3.3, patched js-yaml, sharp, smol-toml, browserslist, ws, form-data and protobufjs versions, and Go gRPC 1.83.2, x/crypto 0.55.0 and x/mod 0.40.0. The provider requires patched Go 1.26.8, which was used for its tests. JavaScript overrides preserve the existing major line where multiple major lines occur. The cookbook installs this fork's current 1.100.0 release
 
 The optional Rust Bedrock client selects the AWS SDK default HTTPS client rather than its legacy TLS feature. This removes rustls 0.21 and rustls-webpki 0.101 from the dependency graph while retaining certificate verification with rustls 0.23 and webpki 0.103.13
 
