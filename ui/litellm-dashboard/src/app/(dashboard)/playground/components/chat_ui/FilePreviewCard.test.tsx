@@ -52,3 +52,19 @@ describe("FilePreviewCard", () => {
     expect(screen.queryByAltText("Upload preview")).not.toBeInTheDocument();
   });
 });
+
+describe("FilePreviewCard untrusted preview URLs", () => {
+  it.each(["javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "https://example.invalid/tracker"])(
+    "does not load %s as a local upload preview",
+    (previewUrl) => {
+      render(<FilePreviewCard file={makeFile("image.png")} previewUrl={previewUrl} onRemove={vi.fn()} />);
+      expect(screen.getByAltText("Upload preview")).not.toHaveAttribute("src");
+    },
+  );
+
+  it("preserves a browser-created blob preview", () => {
+    const previewUrl = "blob:http://localhost/preview-identity";
+    render(<FilePreviewCard file={makeFile("image.png")} previewUrl={previewUrl} onRemove={vi.fn()} />);
+    expect(screen.getByAltText("Upload preview")).toHaveAttribute("src", previewUrl);
+  });
+});

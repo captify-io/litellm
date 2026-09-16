@@ -439,3 +439,25 @@ async fn messages_rejects_unsupported_provider() {
 
     assert!(matches!(err, CoreError::InvalidProvider(provider) if provider == "openai"));
 }
+
+#[tokio::test]
+async fn provider_redirects_cannot_forward_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accepts request");
+        let _ = read_http_request(&mut socket).await;
+        socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://example.invalid/credential-sink\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.expect("writes redirect");
+    });
+    let result = messages(MessagesRequest {
+        model: "claude-sonnet-4-5",
+        body: json!({"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"hello"}]}),
+        api_key: Some("synthetic-test-key"),
+        api_base: Some(&format!("http://{addr}")),
+        custom_llm_provider: Some("anthropic"),
+        extra_headers: None,
+        timeout: Some(Duration::from_secs(5)),
+    }).await;
+    assert!(matches!(result, Err(CoreError::Http { status: 302, .. })));
+    server.await.expect("server completes");
+}
