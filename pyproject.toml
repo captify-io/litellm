@@ -299,6 +299,7 @@ override-dependencies = [
 default-groups = ["dev"]
 required-version = ">=0.10.9"
 exclude-newer = "3 days"
+exclude-newer-package = { tornado = "2026-09-16T00:00:00Z" }
 
 [tool.uv.sources]
 litellm-proxy-extras = { workspace = true }
