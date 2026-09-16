@@ -67,4 +67,25 @@ describe("FilePreviewCard untrusted preview URLs", () => {
     render(<FilePreviewCard file={makeFile("image.png")} previewUrl={previewUrl} onRemove={vi.fn()} />);
     expect(screen.getByAltText("Upload preview")).toHaveAttribute("src", previewUrl);
   });
+  it("encodes active-content characters without altering valid blob origins", () => {
+    const file = new File(["image"], "preview.png", { type: "image/png" });
+    const { rerender } = render(
+      <FilePreviewCard file={file} previewUrl={'blob:https://example.com/"<payload>'} onRemove={vi.fn()} />,
+    );
+    expect(screen.getByRole("img", { name: "Upload preview" })).toHaveAttribute(
+      "src",
+      "blob:https://example.com/%22%3Cpayload%3E",
+    );
+    rerender(
+      <FilePreviewCard
+        file={file}
+        previewUrl="blob:http://[::1]:3000/12345678-1234-1234-1234-123456789abc"
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "Upload preview" })).toHaveAttribute(
+      "src",
+      "blob:http://[::1]:3000/12345678-1234-1234-1234-123456789abc",
+    );
+  });
 });

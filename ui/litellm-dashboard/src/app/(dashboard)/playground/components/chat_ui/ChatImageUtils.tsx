@@ -10,7 +10,7 @@ export interface ChatMultimodalContent {
 }
 
 export const safeBlobPreviewUrl = (value: string | null): string | undefined =>
-  value?.startsWith("blob:") ? value : undefined;
+  value?.startsWith("blob:") ? value.replace(/[<>"']/g, encodeURIComponent) : undefined;
 
 export const convertImageToBase64 = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
