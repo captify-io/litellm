@@ -145,6 +145,9 @@ semgrep-sast:
 
 container_scanning:
   stage: test
+  # Override the analyzer template default that disables build artifact downloads.
+  dependencies:
+    - build-image
   before_script:
     - 'test -n "$LITELLM_IMAGE"'
     - export CS_IMAGE="$LITELLM_IMAGE"
