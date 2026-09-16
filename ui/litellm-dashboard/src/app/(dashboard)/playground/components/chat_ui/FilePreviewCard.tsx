@@ -1,5 +1,6 @@
 import { FileText, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { safeBlobPreviewUrl } from "./ChatImageUtils";
 
 interface FilePreviewCardProps {
   file: File;
@@ -20,7 +21,7 @@ function FilePreviewCard({ file, previewUrl, onRemove }: FilePreviewCardProps) {
             </div>
           ) : (
             <img
-              src={previewUrl || ""}
+              src={safeBlobPreviewUrl(previewUrl)}
               alt="Upload preview"
               className="w-10 h-10 rounded-md border border-border object-cover"
             />

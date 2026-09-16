@@ -52,3 +52,40 @@ describe("FilePreviewCard", () => {
     expect(screen.queryByAltText("Upload preview")).not.toBeInTheDocument();
   });
 });
+
+describe("FilePreviewCard untrusted preview URLs", () => {
+  it.each(["javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "https://example.invalid/tracker"])(
+    "does not load %s as a local upload preview",
+    (previewUrl) => {
+      render(<FilePreviewCard file={makeFile("image.png")} previewUrl={previewUrl} onRemove={vi.fn()} />);
+      expect(screen.getByAltText("Upload preview")).not.toHaveAttribute("src");
+    },
+  );
+
+  it("preserves a browser-created blob preview", () => {
+    const previewUrl = "blob:http://localhost/preview-identity";
+    render(<FilePreviewCard file={makeFile("image.png")} previewUrl={previewUrl} onRemove={vi.fn()} />);
+    expect(screen.getByAltText("Upload preview")).toHaveAttribute("src", previewUrl);
+  });
+  it("encodes active-content characters without altering valid blob origins", () => {
+    const file = new File(["image"], "preview.png", { type: "image/png" });
+    const { rerender } = render(
+      <FilePreviewCard file={file} previewUrl={'blob:https://example.com/"<payload>'} onRemove={vi.fn()} />,
+    );
+    expect(screen.getByRole("img", { name: "Upload preview" })).toHaveAttribute(
+      "src",
+      "blob:https://example.com/%22%3Cpayload%3E",
+    );
+    rerender(
+      <FilePreviewCard
+        file={file}
+        previewUrl="blob:http://[::1]:3000/12345678-1234-1234-1234-123456789abc"
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "Upload preview" })).toHaveAttribute(
+      "src",
+      "blob:http://[::1]:3000/12345678-1234-1234-1234-123456789abc",
+    );
+  });
+});

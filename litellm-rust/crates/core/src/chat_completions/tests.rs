@@ -32,7 +32,7 @@ fn request<'a>(
 fn decline(request: ChatCompletionsRequest<'_>) -> CoreError {
     match prepare_chat_completions_call(request) {
         Err(error) => error,
-        Ok(prepared) => panic!("expected a decline, prepared a call to {}", prepared.url),
+        Ok(_) => panic!("expected a decline, prepared an upstream call"),
     }
 }
 
@@ -111,7 +111,7 @@ fn the_deployment_credential_replaces_a_caller_supplied_auth_header() {
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("x-api-key"))
         .collect();
-    assert_eq!(keys.len(), 1, "got {:?}", prepared.upstream_headers);
+    assert_eq!(keys.len(), 1, "expected one authentication header");
     assert_eq!(keys[0].1, "sk-test");
 }
 
@@ -139,8 +139,7 @@ fn a_forwarded_authorization_header_suppresses_the_resolved_api_key_header() {
             .upstream_headers
             .iter()
             .any(|(name, value)| name.eq_ignore_ascii_case("x-api-key") && value == "sk-test"),
-        "the resolved key must not be applied over an OAuth bearer, got {:?}",
-        prepared.upstream_headers
+        "the resolved key must not be applied over an OAuth bearer"
     );
     assert!(
         prepared
@@ -172,7 +171,7 @@ fn an_unrelated_forwarded_authorization_does_not_defer_the_resolved_key() {
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("x-api-key"))
         .collect();
-    assert_eq!(keys.len(), 1, "got {:?}", prepared.upstream_headers);
+    assert_eq!(keys.len(), 1, "expected one authentication header");
     assert_eq!(keys[0].1, "sk-test");
     assert!(
         prepared
@@ -180,8 +179,7 @@ fn an_unrelated_forwarded_authorization_does_not_defer_the_resolved_key() {
             .iter()
             .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
                 && value == "Bearer unrelated"),
-        "the unrelated authorization must survive, got {:?}",
-        prepared.upstream_headers
+        "the unrelated authorization must survive"
     );
 }
 
@@ -437,7 +435,7 @@ fn an_anthropic_forwarded_oauth_bearer_still_outranks_the_resolved_key() {
         .filter(|(name, _)| name.eq_ignore_ascii_case("x-api-key"))
         .map(|(_, value)| value.as_str())
         .collect();
-    assert!(keys.is_empty(), "got {:?}", prepared.upstream_headers);
+    assert!(keys.is_empty(), "unexpected authentication header");
     assert!(
         prepared
             .upstream_headers

@@ -13,7 +13,7 @@ import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { UiLoadingSpinner } from "@/components/ui/ui-loading-spinner";
 import { useZodForm } from "@/lib/forms/useZodForm";
-import { pluginSchema, type PluginFormValues } from "./schema";
+import { pluginSchema, safePluginUrl, type PluginFormValues } from "./schema";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const INLINE_CODE_CLASS = "rounded-sm bg-muted px-1 py-0.5 font-mono text-xs";
@@ -115,7 +115,12 @@ export default function PluginSettings() {
         </TableCell>
         <TableCell>{plugin.display_name}</TableCell>
         <TableCell>
-          <a href={plugin.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+          <a
+            href={safePluginUrl(plugin.url)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary hover:underline"
+          >
             {plugin.url}
           </a>
         </TableCell>
