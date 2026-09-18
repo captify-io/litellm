@@ -104,7 +104,8 @@ USER root
 
 # node (without npm) is required by the prisma CLI at runtime
 RUN apk upgrade --no-cache && \
-    apk add --no-cache bash openssl tzdata nodejs python3 libsndfile
+    apk add --no-cache bash openssl tzdata nodejs python3 libsndfile \
+    "zlib>=1.3.2.1_rc20260601-r0"
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:${PATH}" \
