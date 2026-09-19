@@ -234,7 +234,7 @@ class DatabaseURLSettings(BaseSettings):
                 name=cast(str, self.database_name),
                 schema=self.database_schema,
             )
-            return endpoint.build_url(mint_database_token(auth, endpoint))
+            return endpoint.build_url(mint_database_token(auth, endpoint), previous_url=self.database_url)
 
         # Password auth: an operator-pinned DATABASE_URL always wins.
         if self.database_url:

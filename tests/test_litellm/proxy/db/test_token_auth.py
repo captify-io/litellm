@@ -189,6 +189,16 @@ def test_build_url_inserts_the_token_verbatim():
     )
 
 
+def test_build_url_preserves_duplicate_and_blank_options_without_reusing_credentials():
+    previous = "postgresql://other:OLD_TOKEN@old.example.com/old?sslmode=require&options=one&options=two&application_name="
+    endpoint = _endpoint()
+
+    assert endpoint.build_url("NEW%2FTOKEN", previous_url=previous) == (
+        "postgresql://litellm:NEW%2FTOKEN@pg.postgres.database.azure.com:5432/litellm_db"
+        "?sslmode=require&options=one&options=two&application_name="
+    )
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
