@@ -16,7 +16,7 @@ def init_rds_client(
     *,
     aws_session_token: str | None = None,
 ):
-    from litellm.secret_managers.main import get_secret, get_secret_str
+    from litellm.secret_managers.main import get_secret_str
 
     session_token: Final = (
         get_secret_str(aws_session_token)
@@ -25,8 +25,8 @@ def init_rds_client(
     )
 
     # check for custom AWS_REGION_NAME and use it if not passed to init_bedrock_client
-    litellm_aws_region_name: Final = get_secret("AWS_REGION_NAME", None)
-    standard_aws_region_name: Final = get_secret("AWS_REGION", None)
+    litellm_aws_region_name: Final = get_secret_str("AWS_REGION_NAME", None)
+    standard_aws_region_name: Final = get_secret_str("AWS_REGION", None)
     ## CHECK IS  'os.environ/' passed in
     # Define the list of parameters to check
     params_to_check: Final = [
@@ -42,7 +42,7 @@ def init_rds_client(
     # Iterate over parameters and update if needed
     for i, param in enumerate(params_to_check):
         if param and param.startswith("os.environ/"):
-            params_to_check[i] = get_secret(param)
+            params_to_check[i] = get_secret_str(param)
     # Assign updated values back to parameters
     (
         aws_access_key_id,
@@ -81,7 +81,7 @@ def init_rds_client(
         try:
             oidc_token = open(aws_web_identity_token).read()  # check if filepath
         except Exception:
-            oidc_token = get_secret(aws_web_identity_token)
+            oidc_token = get_secret_str(aws_web_identity_token)
 
         if oidc_token is None:
             raise Exception(
