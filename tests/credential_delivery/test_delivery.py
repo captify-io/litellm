@@ -463,6 +463,24 @@ class Delivery(unittest.TestCase):
         self.assertNotIn("old-reader-secret", json.dumps(result))
         self.assertEqual(TARGET.database_environment(result, result, identity, "us-gov-west-1"), result)
 
+    def test_iam_keeps_pinned_url_schema_precedence_over_stale_discrete_settings(self):
+        identity = TARGET.database_identity(self.iam_configuration(), ACCOUNT, "aws-us-gov")
+        for query, expected in (("?schema=url_schema", "url_schema"), ("", "")):
+            previous = {
+                **self.database_settings(),
+                "DATABASE_SCHEMA": "stale_schema",
+                "DATABASE_SCHEMA_READ_REPLICA": "stale_reader_schema",
+                "DATABASE_URL": "postgresql://app:secret@writer.example.test:5432/app" + query,
+                "DATABASE_URL_READ_REPLICA": "postgresql://app:secret@reader.example.test:5432/app" + query,
+            }
+            result = TARGET.database_environment(previous, previous, identity, "us-gov-west-1")
+            for suffix in ("", "_READ_REPLICA"):
+                self.assertEqual(result["DATABASE_SCHEMA" + suffix], expected)
+                self.assertEqual(
+                    parse_qs(urlsplit(result["DATABASE_URL" + suffix]).query).get("schema", [""]), [expected]
+                )
+                self.assertNotIn("stale", result["DATABASE_URL" + suffix])
+
     def test_iam_scope_and_certificate_fail_closed(self):
         auth = self.iam_configuration()
         for changes in (

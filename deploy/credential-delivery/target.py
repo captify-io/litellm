@@ -82,6 +82,13 @@ def database_endpoint(environment: Mapping[str, str], suffix: str = "") -> Datab
     return DatabaseEndpoint(host, port, name)
 
 
+def database_schema(environment: Mapping[str, str], suffix: str = "") -> str:
+    url: Final = environment.get("DATABASE_URL" + suffix, "")
+    if url:
+        return dict(parse_qsl(urlsplit(url).query, keep_blank_values=True)).get("schema", "")
+    return environment.get("DATABASE_SCHEMA" + suffix) or environment.get("DATABASE_SCHEMA", "")
+
+
 def database_iam_url(endpoint: DatabaseEndpoint, username: str, previous_url: str, schema: str) -> str:
     options: Final = parse_qsl(urlsplit(previous_url).query, keep_blank_values=True)
     if len({key for key, _ in options}) != len(options):
@@ -131,31 +138,33 @@ def database_environment(
         raise ValueError("Database authentication change cannot change the reader endpoint")
     if previous.get("DIRECT_URL") or merged.get("DIRECT_URL"):
         raise ValueError("A direct migration URL requires separately qualified token renewal")
+    writer_schema: Final = database_schema(merged)
+    reader_schema: Final = database_schema(merged, "_READ_REPLICA") if reader is not None else ""
     return {
         **{key: value for key, value in merged.items() if key not in DATABASE_PASSWORD_FIELDS},
         "DATABASE_HOST": writer.host,
         "DATABASE_PORT": writer.port,
         "DATABASE_NAME": writer.database,
+        "DATABASE_SCHEMA": writer_schema,
         "DATABASE_USER": identity.username,
         "DATABASE_USERNAME": identity.username,
         "IAM_TOKEN_DB_AUTH": "True",
         "DATABASE_AWS_ROLE_ARN": identity.role_arn,
         "DATABASE_AWS_REGION_NAME": region,
-        "DATABASE_URL": database_iam_url(
-            writer, identity.username, merged.get("DATABASE_URL", ""), merged.get("DATABASE_SCHEMA", "")
-        ),
+        "DATABASE_URL": database_iam_url(writer, identity.username, merged.get("DATABASE_URL", ""), writer_schema),
         **(
             {
                 "DATABASE_HOST_READ_REPLICA": reader.host,
                 "DATABASE_PORT_READ_REPLICA": reader.port,
                 "DATABASE_NAME_READ_REPLICA": reader.database,
+                "DATABASE_SCHEMA_READ_REPLICA": reader_schema,
                 "DATABASE_USER_READ_REPLICA": identity.username,
                 "DATABASE_USERNAME_READ_REPLICA": identity.username,
                 "DATABASE_URL_READ_REPLICA": database_iam_url(
                     reader,
                     identity.username,
                     merged.get("DATABASE_URL_READ_REPLICA", ""),
-                    merged.get("DATABASE_SCHEMA_READ_REPLICA", merged.get("DATABASE_SCHEMA", "")),
+                    reader_schema,
                 ),
             }
             if reader is not None
