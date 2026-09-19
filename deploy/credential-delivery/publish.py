@@ -5,14 +5,14 @@ AWS credentials stay in the subprocess environment; shared AWS profile files are
 """
 
 import base64
-import json
 import ipaddress
+import json
 import os
-from pathlib import Path
 import re
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 
 def api_client(service, environment):
@@ -77,8 +77,10 @@ def bindings(environment):
         "containerPort",
         "bindAddress",
     }
-    if set(config) != required:
+    if not required <= set(config) or set(config) - required - {"runtimeMigration"}:
         raise ValueError("Deployment configuration has missing or unknown fields")
+    if config.get("runtimeMigration", "preserve") not in ("preserve", "root-to-nonroot-v1"):
+        raise ValueError("Unsupported runtime migration")
     account, partition, region = (config[k] for k in ("accountId", "partition", "region"))
     if not re.fullmatch(r"[0-9]{12}", account) or partition not in ("aws", "aws-us-gov", "aws-cn"):
         raise ValueError("Explicit account and supported partition are required")
@@ -115,6 +117,8 @@ def bindings(environment):
     ):
         raise ValueError("Explicit TCP ports are required")
     mode = environment.get("DEPLOY_MODE", "release")
+    if mode != "release" and config.get("runtimeMigration", "preserve") != "preserve":
+        raise ValueError("Runtime migration requires a qualified release image")
     if mode not in ("release", "credentials"):
         raise ValueError("Unsupported deployment mode")
     image = environment["LITELLM_IMAGE"]
