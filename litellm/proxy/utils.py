@@ -3593,7 +3593,7 @@ class PrismaClient:
                 # loop and times out after 30s.
                 if token_auth is not None and reader_iam_endpoint is not None:
                     reader_token: Final = mint_database_token(token_auth, reader_iam_endpoint)
-                    read_replica_url = reader_iam_endpoint.build_url(reader_token)
+                    read_replica_url = reader_iam_endpoint.build_url(reader_token, previous_url=read_replica_url)
                     os.environ["DATABASE_URL_READ_REPLICA"] = read_replica_url
                 reader_kwargs: Final[dict[str, Any]] = {"datasource": {"url": read_replica_url}}
                 if http_client is not None:
