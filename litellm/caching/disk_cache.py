@@ -17,13 +17,19 @@ else:
     Span = Any
 
 
+def _disk_cache_directory(directory: str) -> Path:
+    root: Final = os.path.realpath(os.environ.get("LITELLM_DISK_CACHE_ROOT", os.getcwd()))
+    resolved: Final = os.path.realpath(os.path.join(root, directory))
+    if resolved == root:
+        return Path(root)
+    if not resolved.startswith(root.rstrip(os.sep) + os.sep):
+        raise ValueError("Disk cache directory must remain inside LITELLM_DISK_CACHE_ROOT")
+    return Path(resolved)
+
+
 class _JsonDiskStore:
     def __init__(self, directory: str, *, clock: Callable[[], float] = time.time, size_limit: int = 2**30) -> None:
-        root: Final = os.path.realpath(os.environ.get("LITELLM_DISK_CACHE_ROOT", os.getcwd()))
-        resolved: Final = os.path.realpath(os.path.join(root, directory))
-        if resolved != root and not resolved.startswith(root.rstrip(os.sep) + os.sep):
-            raise ValueError("Disk cache directory must remain inside LITELLM_DISK_CACHE_ROOT")
-        self.directory = Path(resolved)
+        self.directory = _disk_cache_directory(directory)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.directory / "litellm-json-cache.sqlite3"
         if self.path.is_symlink():
