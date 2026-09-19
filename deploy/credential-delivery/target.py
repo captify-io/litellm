@@ -3,16 +3,198 @@
 import copy
 import datetime
 import fcntl
+import hashlib
 import http.client
+import io
 import json
 import os
 import re
 import socket
+import ssl
 import subprocess
+import tarfile
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Final, NamedTuple, Optional
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
+
+DATABASE_CA_PATH: Final = "/tmp/litellm-database-ca.pem"
+DATABASE_PASSWORD_FIELDS: Final = frozenset(("DATABASE_PASSWORD", "DATABASE_PASSWORD_READ_REPLICA"))
+
+
+class DatabaseIdentity(NamedTuple):
+    username: str
+    role_arn: str
+    ca_pem: str
+    ca_sha256: str
+
+
+class DatabaseEndpoint(NamedTuple):
+    host: str
+    port: str
+    database: str
+
+
+def database_identity(value: object, account: str, partition: str) -> Optional[DatabaseIdentity]:  # noqa: UP045  # Target runs Python 3.9
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"mode", "username", "roleArn", "caPem", "caSha256"}:
+        raise ValueError("Explicit database authentication configuration is required")
+    if not all(isinstance(item, str) for item in value.values()) or value["mode"] != "rds-iam":
+        raise ValueError("Unsupported database authentication configuration")
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", value["username"]):
+        raise ValueError("Explicit database login is required")
+    if not re.fullmatch(re.escape(f"arn:{partition}:iam::{account}:role/") + r"[A-Za-z0-9+=,.@_/-]+", value["roleArn"]):
+        raise ValueError("Database role must belong to the selected account and partition")
+    certificate: Final = value["caPem"]
+    if len(certificate) > 8192 or not re.fullmatch(
+        r"-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n?", certificate
+    ):
+        raise ValueError("Exactly one public CA certificate is required")
+    if hashlib.sha256(certificate.encode()).hexdigest() != value["caSha256"]:
+        raise ValueError("Database CA digest differs")
+    ssl.create_default_context(cadata=certificate)
+    return DatabaseIdentity(value["username"], value["roleArn"], certificate, value["caSha256"])
+
+
+def database_endpoint(environment: Mapping[str, str], suffix: str = "") -> DatabaseEndpoint:
+    url: Final = environment.get("DATABASE_URL" + suffix, "")
+    parsed: Final = urlsplit(url)
+    if url and (parsed.scheme not in ("postgres", "postgresql") or parsed.fragment):
+        raise ValueError("Unsupported database URL")
+    host: Final = parsed.hostname if url else environment.get("DATABASE_HOST" + suffix)
+    port: Final = (
+        str(parsed.port or 5432)
+        if url
+        else environment.get("DATABASE_PORT" + suffix) or environment.get("DATABASE_PORT", "5432")
+    )
+    name: Final = (
+        unquote(parsed.path.removeprefix("/"))
+        if url
+        else environment.get("DATABASE_NAME" + suffix) or environment.get("DATABASE_NAME")
+    )
+    if not host or not re.fullmatch(r"[A-Za-z0-9.-]+", host) or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError("Explicit database endpoint is required")
+    if not name or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}", name):
+        raise ValueError("Explicit database name is required")
+    return DatabaseEndpoint(host, port, name)
+
+
+def database_schema(environment: Mapping[str, str], suffix: str = "") -> str:
+    url: Final = environment.get("DATABASE_URL" + suffix, "")
+    if url:
+        return dict(parse_qsl(urlsplit(url).query, keep_blank_values=True)).get("schema", "")
+    return environment.get("DATABASE_SCHEMA" + suffix) or environment.get("DATABASE_SCHEMA", "")
+
+
+def database_iam_url(endpoint: DatabaseEndpoint, username: str, previous_url: str, schema: str) -> str:
+    options: Final = parse_qsl(urlsplit(previous_url).query, keep_blank_values=True)
+    if len({key for key, _ in options}) != len(options):
+        raise ValueError("Duplicate database URL options require review")
+    forbidden: Final = {"password", "user", "username", "host", "port", "dbname", "sslidentity", "sslpassword"}
+    if any(key.lower() in forbidden for key, _ in options):
+        raise ValueError("Conflicting database URL credentials require review")
+    selected: Final = {
+        **({"schema": schema} if schema else {}),
+        **dict(options),
+        "sslmode": "require",
+        "sslaccept": "strict",
+        "sslcert": DATABASE_CA_PATH,
+    }
+    return f"postgresql://{quote(username, safe='')}@{endpoint.host}:{endpoint.port}/{quote(endpoint.database, safe='')}?{urlencode(selected)}"
+
+
+def database_environment(
+    previous: Mapping[str, str],
+    updates: Mapping[str, str],
+    identity: Optional[DatabaseIdentity],  # noqa: UP045  # Target runs Python 3.9
+    region: str,
+) -> dict[str, str]:
+    merged: Final = dict(updates)
+    if identity is None:
+        if any(
+            source.get("IAM_TOKEN_DB_AUTH", "").lower() not in ("", "false", "0", "no", "off")
+            for source in (previous, updates)
+        ):
+            raise ValueError("Existing IAM authentication requires its explicit deployment binding")
+        return merged
+    if merged.get("AZURE_POSTGRESQL_AUTH", "").lower() not in ("", "false", "0", "no", "off"):
+        raise ValueError("Conflicting database authentication")
+    for key, expected in (("DATABASE_AWS_ROLE_ARN", identity.role_arn), ("DATABASE_AWS_REGION_NAME", region)):
+        if updates.get(key) and updates[key] != expected:
+            raise ValueError("Database identity override differs from selected deployment")
+    writer: Final = database_endpoint(previous)
+    if database_endpoint(merged) != writer:
+        raise ValueError("Database authentication change cannot change the writer endpoint")
+    reader_enabled: Final = bool(
+        previous.get("DATABASE_URL_READ_REPLICA") or previous.get("DATABASE_HOST_READ_REPLICA")
+    )
+    if bool(merged.get("DATABASE_URL_READ_REPLICA") or merged.get("DATABASE_HOST_READ_REPLICA")) != reader_enabled:
+        raise ValueError("Database authentication change cannot change reader routing")
+    reader: Final = database_endpoint(previous, "_READ_REPLICA") if reader_enabled else None
+    if reader is not None and database_endpoint(merged, "_READ_REPLICA") != reader:
+        raise ValueError("Database authentication change cannot change the reader endpoint")
+    if previous.get("DIRECT_URL") or merged.get("DIRECT_URL"):
+        raise ValueError("A direct migration URL requires separately qualified token renewal")
+    writer_schema: Final = database_schema(merged)
+    reader_schema: Final = database_schema(merged, "_READ_REPLICA") if reader is not None else ""
+    return {
+        **{key: value for key, value in merged.items() if key not in DATABASE_PASSWORD_FIELDS},
+        "DATABASE_HOST": writer.host,
+        "DATABASE_PORT": writer.port,
+        "DATABASE_NAME": writer.database,
+        "DATABASE_SCHEMA": writer_schema,
+        "DATABASE_USER": identity.username,
+        "DATABASE_USERNAME": identity.username,
+        "IAM_TOKEN_DB_AUTH": "True",
+        "DATABASE_AWS_ROLE_ARN": identity.role_arn,
+        "DATABASE_AWS_REGION_NAME": region,
+        "DATABASE_URL": database_iam_url(writer, identity.username, merged.get("DATABASE_URL", ""), writer_schema),
+        **(
+            {
+                "DATABASE_HOST_READ_REPLICA": reader.host,
+                "DATABASE_PORT_READ_REPLICA": reader.port,
+                "DATABASE_NAME_READ_REPLICA": reader.database,
+                "DATABASE_SCHEMA_READ_REPLICA": reader_schema,
+                "DATABASE_USER_READ_REPLICA": identity.username,
+                "DATABASE_USERNAME_READ_REPLICA": identity.username,
+                "DATABASE_URL_READ_REPLICA": database_iam_url(
+                    reader,
+                    identity.username,
+                    merged.get("DATABASE_URL_READ_REPLICA", ""),
+                    reader_schema,
+                ),
+            }
+            if reader is not None
+            else {}
+        ),
+    }
+
+
+def stage_database_ca(container_id: str, identity: DatabaseIdentity) -> None:
+    content: Final = identity.ca_pem.encode()
+    entry: Final = tarfile.TarInfo(Path(DATABASE_CA_PATH).name)
+    entry.size = len(content)
+    entry.mode = 0o444
+    with io.BytesIO() as buffer:
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            archive.addfile(entry, io.BytesIO(content))
+        docker("PUT", "/containers/" + container_id + "/archive?path=/tmp", buffer.getvalue())
+    copied: Final = docker("GET", "/containers/" + container_id + "/archive?path=" + DATABASE_CA_PATH, raw=True)
+    with tarfile.open(fileobj=io.BytesIO(copied), mode="r:") as archive:
+        members: Final = archive.getmembers()
+        if (
+            len(members) != 1
+            or not members[0].isfile()
+            or members[0].name != Path(DATABASE_CA_PATH).name
+            or (members[0].uid, members[0].gid, members[0].mode) != (0, 0, 0o444)
+        ):
+            raise ValueError("Candidate database certificate is not the selected regular file")
+        file: Final = archive.extractfile(members[0])
+        if file is None or hashlib.sha256(file.read(8193)).hexdigest() != identity.ca_sha256:
+            raise ValueError("Candidate database certificate differs")
 
 
 def execute(arguments, *, environment=None, input_text=None, timeout=90):
@@ -64,6 +246,7 @@ def fetch(binding, instance_path=Path("/var/lib/cloud/data/instance-id")):
         raise ValueError("Secret differs from reviewed deployment")
     if secret.get("schemaVersion") != 1 or not 0 < secret["expiresAt"] - time.time() <= 1200:
         raise ValueError("Expired or invalid deployment secret")
+    database_identity(binding.get("databaseAuthentication"), binding["accountId"], binding["partition"])
     updates = secret.get("environmentUpdates")
     if not isinstance(updates, dict) or not updates:
         raise ValueError("Missing environment updates")
@@ -77,20 +260,23 @@ def fetch(binding, instance_path=Path("/var/lib/cloud/data/instance-id")):
     return secret
 
 
-def docker(method, path, body=None):
+def docker(method, path, body=None, *, raw=False):
     connection = http.client.HTTPConnection("localhost", timeout=90)
     connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.sock.settimeout(connection.timeout)
     try:
         connection.sock.connect("/var/run/docker.sock")
         connection.request(
-            method, path, body=None if body is None else json.dumps(body), headers={"Content-Type": "application/json"}
+            method,
+            path,
+            body=body if isinstance(body, bytes) else None if body is None else json.dumps(body),
+            headers={"Content-Type": "application/x-tar" if isinstance(body, bytes) else "application/json"},
         )
         response = connection.getresponse()
         data = response.read()
         if not 200 <= response.status < 300:
             raise RuntimeError("Local container operation failed")
-        return json.loads(data) if data else None
+        return data if raw else json.loads(data) if data else None
     finally:
         connection.close()
 
@@ -264,6 +450,13 @@ def replace(
         candidate_body["Env"] = [name + "=" + value for name, value in environment.items()]
         candidate_body["User"] = following["User"]
         candidate_body["Entrypoint"] = following["Entrypoint"]
+    identity = database_identity(binding.get("databaseAuthentication"), binding["accountId"], binding["partition"])
+    previous_environment = dict(value.split("=", 1) for value in old["Config"]["Env"])
+    candidate_environment = dict(value.split("=", 1) for value in candidate_body["Env"])
+    reviewed_environment = database_environment(
+        previous_environment, candidate_environment, identity, binding["region"]
+    )
+    candidate_body["Env"] = [name + "=" + value for name, value in reviewed_environment.items()]
     candidate_name = "litellm-candidate-" + binding["deploymentId"]
     backup_name = "litellm-before-" + binding["deploymentId"]
     candidate_id = None
@@ -272,6 +465,8 @@ def replace(
     dependency_attempted = False
     try:
         candidate_id = docker("POST", "/containers/create?name=" + candidate_name, candidate_body)["Id"]
+        if identity is not None:
+            stage_database_ca(candidate_id, identity)
         current = docker("GET", "/containers/litellm/json")
         if (
             current["Id"] != old["Id"]
@@ -348,6 +543,8 @@ def replace(
         "runtimeMigration": "root-to-nonroot-v1" if startup_changed else "preserve",
         "runtimeUser": candidate_body["User"],
         "registryCredentialDirectoryRemoved": True,
+        "databaseAuthentication": "rds-iam" if identity is not None else "password",
+        "databaseCaSha256": identity.ca_sha256 if identity is not None else None,
     }
 
 

@@ -13,6 +13,9 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+from target import DATABASE_PASSWORD_FIELDS, database_identity
 
 
 def api_client(service, environment):
@@ -77,7 +80,7 @@ def bindings(environment):
         "containerPort",
         "bindAddress",
     }
-    if not required <= set(config) or set(config) - required - {"runtimeMigration"}:
+    if not required <= set(config) or set(config) - required - {"runtimeMigration", "databaseAuthentication"}:
         raise ValueError("Deployment configuration has missing or unknown fields")
     if config.get("runtimeMigration", "preserve") not in ("preserve", "root-to-nonroot-v1"):
         raise ValueError("Unsupported runtime migration")
@@ -91,6 +94,7 @@ def bindings(environment):
     )
     if partition != expected_partition:
         raise ValueError("Region and partition differ")
+    database_identity(config.get("databaseAuthentication"), account, partition)
     prefix = f"arn:{partition}:"
     if not re.fullmatch(re.escape(prefix + f"iam::{account}:role/") + r"[A-Za-z0-9+=,.@_/-]+", config["deployRoleArn"]):
         raise ValueError("Deployment role must belong to the selected account and partition")
@@ -160,12 +164,28 @@ def runtime_secret(binding, environment):
         updates[name] = value
     if not updates or "\r" in content or "\x00" in content:
         raise ValueError("Invalid or empty runtime environment")
-    password = environment.get("LITELLM_DATABASE_PASSWORD", "")
-    reader_password = environment.get("LITELLM_DATABASE_PASSWORD_READ_REPLICA", "")
-    if not password or any(c in password + reader_password for c in "\r\n\x00"):
+    identity = database_identity(binding.get("databaseAuthentication"), binding["accountId"], binding["partition"])
+    if identity is None and updates.get("IAM_TOKEN_DB_AUTH", "").lower() not in ("", "false", "0", "no", "off"):
+        raise ValueError("IAM authentication requires its explicit deployment binding")
+    password = environment.get("LITELLM_DATABASE_PASSWORD", "") if identity is None else ""
+    reader_password = environment.get("LITELLM_DATABASE_PASSWORD_READ_REPLICA", "") if identity is None else ""
+    if identity is None and (not password or any(c in password + reader_password for c in "\r\n\x00")):
         raise ValueError("A single-line database password is required")
-    updates["DATABASE_PASSWORD"] = password
-    updates["DATABASE_PASSWORD_READ_REPLICA"] = reader_password
+    if identity is None:
+        updates["DATABASE_PASSWORD"] = password
+        updates["DATABASE_PASSWORD_READ_REPLICA"] = reader_password
+    else:
+        updates = {name: value for name, value in updates.items() if name not in DATABASE_PASSWORD_FIELDS}
+        if updates.get("DIRECT_URL"):
+            raise ValueError("A direct migration URL requires separate IAM qualification")
+        for name in ("DATABASE_URL", "DATABASE_URL_READ_REPLICA"):
+            if updates.get(name):
+                parsed = urlsplit(updates[name])
+                if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname or parsed.fragment:
+                    raise ValueError("Invalid database URL")
+                updates[name] = urlunsplit(
+                    (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, parsed.query, "")
+                )
     secret = {"schemaVersion": 1, **binding, "expiresAt": int(time.time()) + 1200, "environmentUpdates": updates}
     if binding["mode"] == "release":
         secret.update(

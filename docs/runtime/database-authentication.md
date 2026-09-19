@@ -9,3 +9,5 @@ Without `DATABASE_AWS_ROLE_ARN`, the existing `AWS_ROLE_NAME` or `AWS_ROLE_ARN` 
 Role and web-identity exchanges use the selected database region and client timeouts. For web identity, the selected database role must trust the configured identity provider. These settings do not provision IAM permissions or database users. Verify access, certificate and hostname validation, token renewal, application behavior and rollback before changing a running workload
 
 Writer startup, reader initialization and token renewal preserve each connection URL's TLS, certificate, pool and timeout settings when replacing its token. Configure the reader's own trust settings explicitly; a reader must not inherit the writer's certificate or identity merely because they share a proxy. This preserves configured verification and does not enable strict certificate validation for an unconfigured URL
+
+`DATABASE_AWS_REGION_NAME` selects the database token region without changing `AWS_REGION_NAME` or other provider settings. When absent, existing AWS region resolution is preserved

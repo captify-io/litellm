@@ -2,15 +2,20 @@
 
 import base64
 import copy
+import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
+import sys
+import tarfile
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "deploy/credential-delivery"
@@ -23,7 +28,9 @@ def load(name):
     return result
 
 
-CI, TARGET = load("publish"), load("target")
+TARGET = load("target")
+sys.modules["target"] = TARGET
+CI = load("publish")
 ACCOUNT = "123456789012"
 INSTANCE = "i-" + "1" * 17
 IMAGE = "sha256:" + "a" * 64
@@ -350,6 +357,177 @@ class Delivery(unittest.TestCase):
             "NetworkSettings": {"Networks": {self.config["network"]: {"Aliases": ["c" * 12]}}},
         }
 
+    def iam_configuration(self):
+        certificate = self.root / "test-ca.pem"
+        key = self.root / "test-ca.key"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=synthetic-test-ca",
+                "-keyout",
+                str(key),
+                "-out",
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        key.unlink()
+        pem = certificate.read_text()
+        return {
+            "mode": "rds-iam",
+            "username": "app_iam",
+            "roleArn": f"arn:aws-us-gov:iam::{ACCOUNT}:role/database",
+            "caPem": pem,
+            "caSha256": hashlib.sha256(pem.encode()).hexdigest(),
+        }
+
+    def database_settings(self):
+        return {
+            "DATABASE_HOST": "writer.example.test",
+            "DATABASE_PORT": "5432",
+            "DATABASE_NAME": "app",
+            "DATABASE_USER": "app",
+            "DATABASE_USERNAME": "app",
+            "DATABASE_PASSWORD": "old-writer-secret",
+            "DATABASE_HOST_READ_REPLICA": "reader.example.test",
+            "DATABASE_USERNAME_READ_REPLICA": "app",
+            "DATABASE_PASSWORD_READ_REPLICA": "old-reader-secret",
+            "DATABASE_SCHEMA": "app_schema",
+            "DATABASE_URL": "postgresql://app:old-writer-secret@writer.example.test:5432/app?connection_limit=9&schema=app_schema",
+            "DATABASE_URL_READ_REPLICA": "postgresql://app:old-reader-secret@reader.example.test:5432/app?pool_timeout=13",
+            "AWS_ROLE_NAME": "provider-role",
+            "AWS_REGION_NAME": "us-gov-east-1",
+            "KEEP": "application-value",
+        }
+
+    def test_iam_delivery_does_not_require_database_password_variables(self):
+        auth = self.iam_configuration()
+        self.config_path.write_text(json.dumps({**self.config, "databaseAuthentication": auth}))
+        binding = CI.bindings(self.env)
+        self.env_path.write_text("KEEP=unchanged\nDATABASE_PASSWORD=stale\nDATABASE_PASSWORD_READ_REPLICA=stale\n")
+        environment = {key: value for key, value in self.env.items() if not key.startswith("LITELLM_DATABASE_PASSWORD")}
+        updates = CI.runtime_secret(binding, environment)["environmentUpdates"]
+        self.assertEqual(updates, {"KEEP": "unchanged"})
+        self.assertEqual(binding["databaseAuthentication"], auth)
+
+    def test_iam_publisher_removes_url_credentials_and_keeps_connection_options(self):
+        self.config_path.write_text(json.dumps({**self.config, "databaseAuthentication": self.iam_configuration()}))
+        self.env_path.write_text("DATABASE_URL=postgresql://app:stale@writer.example.test:5432/app?pool_timeout=19\n")
+        updates = CI.runtime_secret(CI.bindings(self.env), self.env)["environmentUpdates"]
+        parsed = urlsplit(updates["DATABASE_URL"])
+        self.assertIsNone(parsed.password)
+        self.assertEqual(parsed.hostname, "writer.example.test")
+        self.assertEqual(parse_qs(parsed.query), {"pool_timeout": ["19"]})
+        self.assertNotIn("stale", json.dumps(updates))
+
+    def test_iam_candidate_replaces_all_database_credentials_and_preserves_url_options(self):
+        auth = self.iam_configuration()
+        identity = TARGET.database_identity(auth, ACCOUNT, "aws-us-gov")
+        previous = self.database_settings()
+        original = copy.deepcopy(previous)
+        result = TARGET.database_environment(previous, previous, identity, "us-gov-west-1")
+        for key in ("DATABASE_PASSWORD", "DATABASE_PASSWORD_READ_REPLICA"):
+            self.assertNotIn(key, result)
+        for key in (
+            "DATABASE_USER",
+            "DATABASE_USERNAME",
+            "DATABASE_USER_READ_REPLICA",
+            "DATABASE_USERNAME_READ_REPLICA",
+        ):
+            self.assertEqual(result[key], "app_iam")
+        for key in ("DATABASE_URL", "DATABASE_URL_READ_REPLICA"):
+            parsed = urlsplit(result[key])
+            self.assertIsNone(parsed.password)
+            self.assertEqual(parsed.username, "app_iam")
+            options = parse_qs(parsed.query)
+            self.assertEqual(options["sslmode"], ["require"])
+            self.assertEqual(options["sslaccept"], ["strict"])
+            self.assertEqual(options["sslcert"], ["/tmp/litellm-database-ca.pem"])
+        self.assertEqual(parse_qs(urlsplit(result["DATABASE_URL"]).query)["connection_limit"], ["9"])
+        self.assertEqual(parse_qs(urlsplit(result["DATABASE_URL_READ_REPLICA"]).query)["pool_timeout"], ["13"])
+        self.assertEqual(result["DATABASE_AWS_REGION_NAME"], "us-gov-west-1")
+        self.assertEqual(result["AWS_REGION_NAME"], "us-gov-east-1")
+        self.assertEqual(result["AWS_ROLE_NAME"], "provider-role")
+        self.assertEqual(result["KEEP"], "application-value")
+        self.assertEqual(previous, original)
+        self.assertNotIn("old-writer-secret", json.dumps(result))
+        self.assertNotIn("old-reader-secret", json.dumps(result))
+        self.assertEqual(TARGET.database_environment(result, result, identity, "us-gov-west-1"), result)
+
+    def test_iam_keeps_pinned_url_schema_precedence_over_stale_discrete_settings(self):
+        identity = TARGET.database_identity(self.iam_configuration(), ACCOUNT, "aws-us-gov")
+        for query, expected in (("?schema=url_schema", "url_schema"), ("", "")):
+            previous = {
+                **self.database_settings(),
+                "DATABASE_SCHEMA": "stale_schema",
+                "DATABASE_SCHEMA_READ_REPLICA": "stale_reader_schema",
+                "DATABASE_URL": "postgresql://app:secret@writer.example.test:5432/app" + query,
+                "DATABASE_URL_READ_REPLICA": "postgresql://app:secret@reader.example.test:5432/app" + query,
+            }
+            result = TARGET.database_environment(previous, previous, identity, "us-gov-west-1")
+            for suffix in ("", "_READ_REPLICA"):
+                self.assertEqual(result["DATABASE_SCHEMA" + suffix], expected)
+                self.assertEqual(
+                    parse_qs(urlsplit(result["DATABASE_URL" + suffix]).query).get("schema", [""]), [expected]
+                )
+                self.assertNotIn("stale", result["DATABASE_URL" + suffix])
+
+    def test_iam_scope_and_certificate_fail_closed(self):
+        auth = self.iam_configuration()
+        for changes in (
+            {"roleArn": auth["roleArn"].replace(ACCOUNT, "999999999999")},
+            {"roleArn": auth["roleArn"].replace("aws-us-gov", "aws")},
+            {"mode": "unknown"},
+            {"username": "app;superuser"},
+            {"caSha256": "0" * 64},
+            {"caPem": auth["caPem"] * 2},
+            {"extra": "unsupported"},
+            {"mode": True},
+        ):
+            with self.subTest(changes=tuple(changes)), self.assertRaises((ValueError, TypeError)):
+                TARGET.database_identity({**auth, **changes}, ACCOUNT, "aws-us-gov")
+
+    def test_iam_refuses_endpoint_changes_and_competing_authentication(self):
+        identity = TARGET.database_identity(self.iam_configuration(), ACCOUNT, "aws-us-gov")
+        previous = self.database_settings()
+        for changes in (
+            {"DATABASE_URL": previous["DATABASE_URL"].replace("writer.example.test", "other.example.test")},
+            {
+                "DATABASE_URL_READ_REPLICA": previous["DATABASE_URL_READ_REPLICA"].replace(
+                    "reader.example.test", "other.example.test"
+                )
+            },
+            {"DIRECT_URL": "postgresql://app:secret@writer.example.test:5432/app"},
+            {"AZURE_POSTGRESQL_AUTH": "true"},
+            {"DATABASE_AWS_ROLE_ARN": "foreign-role"},
+            {"DATABASE_AWS_REGION_NAME": "us-gov-east-1"},
+            {"DATABASE_URL": previous["DATABASE_URL"] + "&connection_limit=10"},
+            {"DATABASE_URL": previous["DATABASE_URL"] + "&password=secret"},
+        ):
+            with self.subTest(changes=tuple(changes)), self.assertRaises(ValueError):
+                TARGET.database_environment(previous, {**previous, **changes}, identity, "us-gov-west-1")
+
+    def test_password_deployment_cannot_disable_existing_iam(self):
+        previous = {**self.database_settings(), "IAM_TOKEN_DB_AUTH": "True"}
+        for flag in (None, "False", "True"):
+            updates = {key: value for key, value in previous.items() if key != "IAM_TOKEN_DB_AUTH"}
+            if flag is not None:
+                updates["IAM_TOKEN_DB_AUTH"] = flag
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                TARGET.database_environment(previous, updates, None, "us-gov-west-1")
+        self.env_path.write_text("IAM_TOKEN_DB_AUTH=True\n")
+        with self.assertRaises(ValueError):
+            CI.runtime_secret(self.binding, self.env)
+
     def test_configuration_merge_preserves_limits_and_nonselected_environment(self):
         old = self.old_container()
         result = TARGET.replacement(old, IMAGE, self.secret["environmentUpdates"], self.config["network"])
@@ -358,10 +536,14 @@ class Delivery(unittest.TestCase):
         self.assertEqual(result["Hostname"], "")
         self.assertEqual(old["Config"]["Env"][0], "TEST_ACCESS_ID=old")
 
-    def rollout(self, failure=None, dependencies=False, migration=False, migration_flag=True, candidate_changes=None):
+    def rollout(
+        self, failure=None, dependencies=False, migration=False, migration_flag=True, candidate_changes=None, iam=False
+    ):
         old = self.old_container()
         if migration:
             old["Config"]["Env"].append("OLD_DEFAULT=retired")
+        if iam:
+            old["Config"]["Env"].extend(key + "=" + value for key, value in self.database_settings().items())
         original = copy.deepcopy(old)
         state = {old["Id"]: old}
         history = []
@@ -380,8 +562,17 @@ class Delivery(unittest.TestCase):
             else prior_image_config
         )
 
-        def api(method, path, body=None):
+        archives = {}
+
+        def api(method, path, body=None, *, raw=False):
             history.append((method, path, copy.deepcopy(body)))
+            if "/archive?" in path:
+                if failure == "certificate":
+                    raise RuntimeError("Certificate staging failed")
+                if method == "PUT":
+                    archives["ca"] = body
+                    return None
+                return archives["ca"]
             if path == "/containers/litellm/json":
                 return copy.deepcopy(next(x for x in state.values() if x["Name"] == "/litellm"))
             if path.startswith("/containers/create"):
@@ -429,6 +620,8 @@ class Delivery(unittest.TestCase):
             "releaseImage": RELEASE if migration else IMAGE,
             **({"runtimeMigration": "root-to-nonroot-v1"} if migration and migration_flag else {}),
         }
+        if iam:
+            binding["databaseAuthentication"] = self.iam_configuration()
         runtime = self.root / "litellm.env"
         runtime.write_text("original-runtime-file")
         recovery = Path(tempfile.mkdtemp(prefix="recovery-", dir=self.root))
@@ -470,6 +663,37 @@ class Delivery(unittest.TestCase):
                     if value:
                         self.assertNotIn(value, json.dumps(receipt))
         return original, state, history, runtime
+
+    def test_iam_rollout_stages_only_public_ca_before_interrupting_and_clears_runtime_passwords(self):
+        original, state, history, runtime = self.rollout(iam=True)
+        live = next(row for row in state.values() if row["Name"] == "/litellm")
+        self.assertIn("IAM_TOKEN_DB_AUTH=True", live["Config"]["Env"])
+        self.assertNotIn("DATABASE_PASSWORD=", runtime.read_text())
+        self.assertNotIn("DATABASE_PASSWORD_READ_REPLICA=", runtime.read_text())
+        self.assertNotIn("old-writer-secret", runtime.read_text())
+        self.assertIn("AWS_ROLE_NAME=provider-role", runtime.read_text())
+        copied = next(body for method, path, body in history if method == "PUT" and "/archive?" in path)
+        with tarfile.open(fileobj=io.BytesIO(copied), mode="r:") as archive:
+            (member,) = archive.getmembers()
+            self.assertTrue(member.isfile())
+            self.assertEqual(member.name, "litellm-database-ca.pem")
+            self.assertEqual((member.uid, member.gid, member.mode), (0, 0, 0o444))
+            self.assertTrue(archive.extractfile(member).read().startswith(b"-----BEGIN CERTIFICATE-----"))
+        put_index = next(i for i, (method, path, _) in enumerate(history) if method == "PUT")
+        stop_index = next(i for i, (_, path, _) in enumerate(history) if "/stop?" in path)
+        self.assertLess(put_index, stop_index)
+        self.assertEqual(live["HostConfig"], original["HostConfig"])
+
+    def test_iam_certificate_staging_failure_keeps_original_service_running(self):
+        original, state, history, runtime = self.rollout("certificate", iam=True)
+        self.assertEqual(state, {original["Id"]: original})
+        self.assertFalse(any("/stop?" in path for _, path, _ in history))
+        self.assertEqual(runtime.read_text(), "original-runtime-file")
+
+    def test_iam_health_failure_restores_previous_password_runtime(self):
+        original, state, history, runtime = self.rollout("health", iam=True)
+        self.assertEqual(state, {original["Id"]: original})
+        self.assertEqual(runtime.read_text(), "original-runtime-file")
 
     def test_candidate_creation_failure_does_not_interrupt_original(self):
         original, state, history, runtime = self.rollout("create")
