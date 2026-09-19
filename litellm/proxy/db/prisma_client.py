@@ -438,7 +438,9 @@ class PrismaWrapper:
             return None
 
         endpoint: Final = self._iam_endpoint if self._iam_endpoint is not None else self._endpoint_from_env()
-        db_url: Final = endpoint.build_url(mint_database_token(auth, endpoint))
+        db_url: Final = endpoint.build_url(
+            mint_database_token(auth, endpoint), previous_url=os.getenv(self._db_url_env_var)
+        )
         os.environ[self._db_url_env_var] = db_url
         return db_url
 

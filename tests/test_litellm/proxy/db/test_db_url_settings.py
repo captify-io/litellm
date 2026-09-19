@@ -100,6 +100,37 @@ def test_returns_false_when_nothing_configured(monkeypatch):
     assert "DATABASE_URL" not in os.environ
 
 
+@pytest.mark.parametrize("provider", ["rds", "entra"])
+def test_token_startup_preserves_configured_tls_and_pool_options(monkeypatch, provider):
+    monkeypatch.setenv("IAM_TOKEN_DB_AUTH" if provider == "rds" else "AZURE_POSTGRESQL_AUTH", "true")
+    monkeypatch.setenv("DATABASE_HOST", "writer.example.com")
+    monkeypatch.setenv("DATABASE_USER", "litellm")
+    monkeypatch.setenv("DATABASE_NAME", "litellm_db")
+    monkeypatch.setenv("DATABASE_SCHEMA", "current_schema")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://litellm:OLD_TOKEN@writer.example.com:5432/litellm_db"
+        "?sslmode=require&sslaccept=strict&sslcert=%2Fcerts%2Froot%20ca.pem"
+        "&connection_limit=7&pool_timeout=30&schema=old_schema&options=",
+    )
+
+    with _stub_iam_token("NEW_TOKEN") if provider == "rds" else _stub_entra_token("NEW_TOKEN"):
+        assert _apply() is True
+
+    parsed = urllib.parse.urlsplit(os.environ["DATABASE_URL"])
+    assert parsed.password == "NEW_TOKEN"
+    assert parsed.hostname == "writer.example.com"
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == {
+        "sslmode": ["require"],
+        "sslaccept": ["strict"],
+        "sslcert": ["/certs/root ca.pem"],
+        "connection_limit": ["7"],
+        "pool_timeout": ["30"],
+        "schema": ["current_schema"],
+        "options": [""],
+    }
+
+
 def test_assembles_writer_url_when_iam_enabled(monkeypatch):
     monkeypatch.setenv("IAM_TOKEN_DB_AUTH", "true")
     monkeypatch.setenv("DATABASE_HOST", "writer.example.com")
