@@ -29,3 +29,11 @@ Focused regression checks:
 ```sh
 python3 -m unittest discover -s tests/credential_delivery -v
 ```
+
+## Temporary AWS credentials for database authentication
+
+The RDS token path carries the complete temporary credential: access key, secret key and session token. `AWS_SESSION_TOKEN` is preferred, with the SDK-compatible legacy `AWS_SECURITY_TOKEN` fallback. Explicit client credentials can supply `aws_session_token`, including an `os.environ/` reference, without inheriting an unrelated ambient token
+
+Role and web-identity exchanges use the configured database region and client timeouts. This is required for partition-specific regional STS endpoints. Session tokens and signed database tokens must remain private
+
+Use `DATABASE_AWS_ROLE_ARN` for a database-specific role, with an optional `DATABASE_AWS_ROLE_SESSION_NAME`. The existing `AWS_ROLE_NAME` setting is shared with other AWS integrations. See [database authentication](../../docs/runtime/database-authentication.md) for precedence and credential requirements. This source correction does not enable IAM database authentication, provision a database user or change existing runtime credentials. Native database access, renewal and application acceptance remain separate qualification steps

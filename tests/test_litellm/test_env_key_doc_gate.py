@@ -13,6 +13,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MODULE_PATH = _REPO_ROOT / "tests" / "documentation_tests" / "test_env_keys.py"
 _spec = importlib.util.spec_from_file_location("documentation_test_env_keys", _MODULE_PATH)
@@ -188,3 +190,22 @@ def test_only_documentation_pages_are_scanned_for_mentions(tmp_path: Path) -> No
     (tmp_path / "notes.txt").write_text("QSTASH_ALPHA\n", encoding="utf-8")
     (tmp_path / "example.py").write_text('get_secret("QSTASH_BRAVO")\n', encoding="utf-8")
     assert gate.collect_documented_keys(str(tmp_path)) == frozenset()
+
+
+def test_runtime_documentation_requires_a_real_entry_and_keeps_upstream_docs_required(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "litellm"
+    upstream = tmp_path / "docs" / "my-website" / "docs"
+    runtime = tmp_path / "docs" / "runtime"
+    source.mkdir()
+    upstream.mkdir(parents=True)
+    runtime.mkdir()
+    (source / "connection.py").write_text('value = os.getenv("DATABASE_AWS_ROLE_ARN")\n')
+    (runtime / "database.md").write_text("Configure your database identity\n")
+    with pytest.raises(Exception, match="DATABASE_AWS_ROLE_ARN"):
+        gate.main()
+    (runtime / "database.md").write_text("Set `DATABASE_AWS_ROLE_ARN` to the database connection role\n")
+    gate.main()
+    upstream.rmdir()
+    with pytest.raises(Exception, match="No documentation found"):
+        gate.main()

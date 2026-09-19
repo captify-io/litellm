@@ -13,12 +13,20 @@ def init_rds_client(
     aws_role_name: str | None = None,
     aws_web_identity_token: str | None = None,
     timeout: float | httpx.Timeout | None = None,
+    *,
+    aws_session_token: str | None = None,
 ):
-    from litellm.secret_managers.main import get_secret
+    from litellm.secret_managers.main import get_secret_str
+
+    session_token: Final = (
+        get_secret_str(aws_session_token)
+        if aws_session_token and aws_session_token.startswith("os.environ/")
+        else aws_session_token
+    )
 
     # check for custom AWS_REGION_NAME and use it if not passed to init_bedrock_client
-    litellm_aws_region_name: Final = get_secret("AWS_REGION_NAME", None)
-    standard_aws_region_name: Final = get_secret("AWS_REGION", None)
+    litellm_aws_region_name: Final = get_secret_str("AWS_REGION_NAME", None)
+    standard_aws_region_name: Final = get_secret_str("AWS_REGION", None)
     ## CHECK IS  'os.environ/' passed in
     # Define the list of parameters to check
     params_to_check: Final = [
@@ -34,7 +42,7 @@ def init_rds_client(
     # Iterate over parameters and update if needed
     for i, param in enumerate(params_to_check):
         if param and param.startswith("os.environ/"):
-            params_to_check[i] = get_secret(param)
+            params_to_check[i] = get_secret_str(param)
     # Assign updated values back to parameters
     (
         aws_access_key_id,
@@ -73,14 +81,14 @@ def init_rds_client(
         try:
             oidc_token = open(aws_web_identity_token).read()  # check if filepath
         except Exception:
-            oidc_token = get_secret(aws_web_identity_token)
+            oidc_token = get_secret_str(aws_web_identity_token)
 
         if oidc_token is None:
             raise Exception(
                 "OIDC token could not be retrieved from secret manager.",
             )
 
-        sts_client = boto3.client("sts")
+        sts_client = boto3.client("sts", region_name=region_name, config=config)
 
         # https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html
         # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sts/client/assume_role_with_web_identity.html
@@ -106,6 +114,9 @@ def init_rds_client(
             "sts",
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
+            aws_session_token=session_token,
+            region_name=region_name,
+            config=config,
         )
 
         sts_response = sts_client.assume_role(RoleArn=aws_role_name, RoleSessionName=aws_session_name)
@@ -126,6 +137,7 @@ def init_rds_client(
             service_name="rds",
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
+            aws_session_token=session_token,
             region_name=region_name,
             config=config,
         )
@@ -155,13 +167,20 @@ def generate_iam_auth_token(db_host, db_port, db_user, client: Any | None = None
     from urllib.parse import quote
 
     if client is None:
+        database_role_arn: Final = os.getenv("DATABASE_AWS_ROLE_ARN")
+        session_name: Final = (
+            os.getenv("DATABASE_AWS_ROLE_SESSION_NAME") or "litellm-database"
+            if database_role_arn
+            else os.getenv("AWS_SESSION_NAME")
+        )
         boto_client = init_rds_client(
             aws_region_name=os.getenv("AWS_REGION_NAME"),
             aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            aws_session_name=os.getenv("AWS_SESSION_NAME"),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN") or os.getenv("AWS_SECURITY_TOKEN"),
+            aws_session_name=session_name,
             aws_profile_name=os.getenv("AWS_PROFILE_NAME"),
-            aws_role_name=os.getenv("AWS_ROLE_NAME", os.getenv("AWS_ROLE_ARN")),
+            aws_role_name=database_role_arn or os.getenv("AWS_ROLE_NAME", os.getenv("AWS_ROLE_ARN")),
             aws_web_identity_token=os.getenv("AWS_WEB_IDENTITY_TOKEN", os.getenv("AWS_WEB_IDENTITY_TOKEN_FILE")),
         )
     else:
