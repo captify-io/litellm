@@ -55,11 +55,12 @@ build-image:
         --build-arg BUILDKIT_INLINE_CACHE=1 \
         --cache-from "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         --cache-from "$CI_REGISTRY_IMAGE:latest" \
-        -f Dockerfile \
+        -f docker/Dockerfile.non_root \
         --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
         -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" \
         --load \
         .
+    - test "$(docker image inspect "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" --format '{{.Config.User}}')" = 65534
     - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
     - |
       LITELLM_IMAGE=$(docker image inspect "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" --format '{{index .RepoDigests 0}}')

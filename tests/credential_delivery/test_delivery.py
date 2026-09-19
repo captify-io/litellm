@@ -5,11 +5,11 @@ import copy
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -120,6 +120,16 @@ class Delivery(unittest.TestCase):
         binding = CI.bindings({**self.env, "DEPLOY_MODE": "credentials", "LITELLM_IMAGE": IMAGE})
         self.assertEqual(binding["releaseImage"], IMAGE)
         self.assertNotIn("registryPassword", CI.runtime_secret(binding, self.env))
+
+    def test_nonroot_migration_requires_explicit_known_release_mode(self):
+        self.config_path.write_text(json.dumps({**self.config, "runtimeMigration": "root-to-nonroot-v1"}))
+        self.assertEqual(CI.bindings(self.env)["runtimeMigration"], "root-to-nonroot-v1")
+        with self.assertRaises(ValueError):
+            CI.bindings({**self.env, "DEPLOY_MODE": "credentials", "LITELLM_IMAGE": IMAGE})
+        for value in ["any", "root", "", None]:
+            self.config_path.write_text(json.dumps({**self.config, "runtimeMigration": value}))
+            with self.assertRaises(ValueError):
+                CI.bindings(self.env)
 
     def test_environment_is_unique_explicit_and_not_shell_interpreted(self):
         for value in ["A=x\nA=y\n", "A\n", "A=x\r\n", "export A=x\n", "A=x\x00\n", ""]:
@@ -324,7 +334,7 @@ class Delivery(unittest.TestCase):
             "Config": {
                 "Hostname": "c" * 12,
                 "Image": IMAGE,
-                "User": "",
+                "User": "root",
                 "Entrypoint": ["docker/prod_entrypoint.sh"],
                 "Cmd": ["--port", "4000"],
                 "WorkingDir": "/app",
@@ -348,12 +358,27 @@ class Delivery(unittest.TestCase):
         self.assertEqual(result["Hostname"], "")
         self.assertEqual(old["Config"]["Env"][0], "TEST_ACCESS_ID=old")
 
-    def rollout(self, failure=None, dependencies=False):
+    def rollout(self, failure=None, dependencies=False, migration=False, migration_flag=True, candidate_changes=None):
         old = self.old_container()
+        if migration:
+            old["Config"]["Env"].append("OLD_DEFAULT=retired")
         original = copy.deepcopy(old)
         state = {old["Id"]: old}
         history = []
         candidate_id = "d" * 64
+        candidate_image_id = "sha256:" + "e" * 64 if migration else IMAGE
+        prior_image_config = {**copy.deepcopy(original["Config"]), "Env": ["OLD_DEFAULT=retired"]}
+        candidate_image_config = (
+            {
+                **prior_image_config,
+                "User": "65534",
+                "Entrypoint": ["/app/docker/prod_entrypoint.sh"],
+                "Env": ["HOME=/tmp", "LITELLM_NON_ROOT=true"],
+                **(candidate_changes or {}),
+            }
+            if migration
+            else prior_image_config
+        )
 
         def api(method, path, body=None):
             history.append((method, path, copy.deepcopy(body)))
@@ -366,6 +391,7 @@ class Delivery(unittest.TestCase):
                 state[candidate_id] = {
                     **copy.deepcopy(original),
                     "Id": candidate_id,
+                    "Image": candidate_image_id,
                     "Name": "/" + path.split("name=")[1],
                     "Config": config,
                     "HostConfig": copy.deepcopy(body["HostConfig"]),
@@ -397,12 +423,30 @@ class Delivery(unittest.TestCase):
             history.append(("DEPENDENCY", "rollback", None))
 
         hooks = {"before_switch": before_switch, "rollback_dependency": rollback_dependency} if dependencies else {}
-        binding = {**self.binding, "mode": "credentials", "releaseImage": IMAGE}
+        binding = {
+            **self.binding,
+            "mode": "release" if migration else "credentials",
+            "releaseImage": RELEASE if migration else IMAGE,
+            **({"runtimeMigration": "root-to-nonroot-v1"} if migration and migration_flag else {}),
+        }
         runtime = self.root / "litellm.env"
         runtime.write_text("original-runtime-file")
-        recovery = self.root / "recovery"
-        recovery.mkdir()
+        recovery = Path(tempfile.mkdtemp(prefix="recovery-", dir=self.root))
         checks = [RuntimeError("candidate health failed"), None] if failure == "health" else [None]
+
+        def execute(arguments, **kwargs):
+            if arguments[:3] != ["docker", "image", "inspect"]:
+                return ""
+            candidate = arguments[-1] == RELEASE
+            return json.dumps(
+                [
+                    {
+                        "Id": candidate_image_id if candidate else IMAGE,
+                        "Config": candidate_image_config if candidate else prior_image_config,
+                    }
+                ]
+            )
+
         with (
             mock.patch.object(TARGET, "docker", side_effect=api),
             mock.patch.object(TARGET, "healthy", return_value=True),
@@ -410,16 +454,17 @@ class Delivery(unittest.TestCase):
             mock.patch.object(
                 TARGET,
                 "execute",
-                return_value=json.dumps([{"Id": IMAGE, "Config": {**original["Config"], "Cmd": None}}]),
+                side_effect=execute,
             ),
         ):
             if failure:
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((RuntimeError, ValueError)):
                     TARGET.replace(binding, self.secret, recovery, runtime, **hooks)
             else:
                 receipt = TARGET.replace(binding, self.secret, recovery, runtime, **hooks)
-                self.assertEqual(receipt["imageId"], IMAGE)
-                self.assertTrue(receipt["launchSettingsPreserved"])
+                self.assertEqual(receipt["imageId"], candidate_image_id)
+                self.assertEqual(receipt["launchSettingsPreserved"], not migration)
+                self.assertTrue(receipt["hostSettingsPreserved"])
                 for name, value in self.secret["environmentUpdates"].items():
                     self.assertNotIn(name, json.dumps(receipt))
                     if value:
@@ -431,6 +476,47 @@ class Delivery(unittest.TestCase):
         self.assertEqual(state[original["Id"]], original)
         self.assertFalse(any("/stop" in p for _, p, _ in history))
         self.assertEqual(runtime.read_text(), "original-runtime-file")
+
+    def test_nonroot_transition_adopts_image_defaults_and_preserves_application_values(self):
+        original, state, history, runtime = self.rollout(migration=True)
+        live = next(x for x in state.values() if x["Name"] == "/litellm")
+        self.assertEqual(live["Config"]["User"], "65534")
+        self.assertEqual(live["Config"]["Entrypoint"], ["/app/docker/prod_entrypoint.sh"])
+        self.assertEqual(live["HostConfig"], original["HostConfig"])
+        self.assertIn("HOME=/tmp", runtime.read_text())
+        self.assertIn("LITELLM_NON_ROOT=true", runtime.read_text())
+        self.assertIn("PRESERVE=unchanged", runtime.read_text())
+        self.assertNotIn("OLD_DEFAULT", runtime.read_text())
+        TARGET.validate_current(live, {**self.binding, "expectedImageId": live["Image"]})
+
+    def test_nonroot_transition_health_failure_restores_root_service(self):
+        original, state, history, runtime = self.rollout("health", migration=True)
+        self.assertEqual(state, {original["Id"]: original})
+        self.assertEqual(runtime.read_text(), "original-runtime-file")
+
+    def test_unapproved_nonroot_transition_refused_before_staging_or_stop(self):
+        original, state, history, runtime = self.rollout("contract", migration=True, migration_flag=False)
+        self.assertEqual(state, {original["Id"]: original})
+        self.assertFalse(any(method != "GET" for method, _, _ in history))
+
+    def test_migration_cannot_substitute_another_startup_contract(self):
+        for changes in [
+            {"User": "root"},
+            {"User": "1000"},
+            {"Entrypoint": ["/bin/sh"]},
+            {"WorkingDir": "/tmp"},
+            {"Cmd": ["--port", "5000"]},
+        ]:
+            with self.subTest(changes=changes):
+                original, state, history, runtime = self.rollout("contract", migration=True, candidate_changes=changes)
+                self.assertEqual(state, {original["Id"]: original})
+                self.assertFalse(any(method != "GET" for method, _, _ in history))
+
+    def test_nonroot_default_override_conflict_refused_before_interruption(self):
+        self.secret["environmentUpdates"]["HOME"] = "/root"
+        original, state, history, runtime = self.rollout("contract", migration=True)
+        self.assertEqual(state, {original["Id"]: original})
+        self.assertFalse(any(method != "GET" for method, _, _ in history))
 
     def test_health_failure_restores_original_and_restart_policy(self):
         original, state, history, runtime = self.rollout("health")

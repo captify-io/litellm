@@ -6,13 +6,13 @@ import fcntl
 import http.client
 import json
 import os
-from pathlib import Path
 import re
 import socket
 import subprocess
 import tempfile
 import time
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
 
 
 def execute(arguments, *, environment=None, input_text=None, timeout=90):
@@ -121,10 +121,18 @@ def validate_current(old, binding):
         binding["containerPort"] + "/tcp": [{"HostIp": binding["bindAddress"], "HostPort": binding["hostPort"]}]
     }:
         raise ValueError("Legacy operator requires the existing local HTTP port")
-    if old["Config"]["Entrypoint"] != ["docker/prod_entrypoint.sh"] or old["Config"]["Cmd"] != [
-        "--port",
-        binding["containerPort"],
-    ]:
+    startup = (old["Config"]["User"], old["Config"]["Entrypoint"])
+    supported = [(user, ["docker/prod_entrypoint.sh"]) for user in ("", "0", "root")]
+    supported.append(("65534", ["/app/docker/prod_entrypoint.sh"]))
+    if (
+        startup not in supported
+        or old["Config"]["WorkingDir"] != "/app"
+        or old["Config"]["Cmd"]
+        != [
+            "--port",
+            binding["containerPort"],
+        ]
+    ):
         raise ValueError("Unexpected application startup command")
     environment = old["Config"]["Env"]
     if any("=" not in value or any(c in value for c in "\r\n\x00") for value in environment):
@@ -215,10 +223,47 @@ def replace(
             raise ValueError("Credential-only transition cannot change the image")
     candidate_image = json.loads(execute(["docker", "image", "inspect", binding["releaseImage"]]))[0]
     prior_image = json.loads(execute(["docker", "image", "inspect", old["Image"]]))[0]
-    for key in ("User", "Entrypoint", "Cmd", "WorkingDir"):
-        if candidate_image["Config"].get(key) != prior_image["Config"].get(key):
-            raise ValueError("Candidate requires a separate runtime migration")
+    startup_keys = ("User", "Entrypoint", "Cmd", "WorkingDir")
+    startup_changed = any(candidate_image["Config"].get(key) != prior_image["Config"].get(key) for key in startup_keys)
+    if binding.get("runtimeMigration", "preserve") != "preserve" and not startup_changed:
+        raise ValueError("Requested runtime migration does not change the reviewed startup")
     candidate_body = replacement(old, binding["releaseImage"], secret["environmentUpdates"], binding["network"])
+    if startup_changed:
+        prior = prior_image["Config"]
+        following = candidate_image["Config"]
+        if (
+            binding.get("runtimeMigration", "preserve") != "root-to-nonroot-v1"
+            or binding["mode"] != "release"
+            or prior.get("User") not in ("", "0", "root")
+            or prior.get("Entrypoint") != ["docker/prod_entrypoint.sh"]
+            or following.get("User") != "65534"
+            or following.get("Entrypoint") != ["/app/docker/prod_entrypoint.sh"]
+            or following.get("WorkingDir") != "/app"
+            or prior.get("WorkingDir") != "/app"
+            or following.get("Cmd") != prior.get("Cmd")
+        ):
+            raise ValueError("Candidate requires a separate runtime migration")
+        old_defaults = dict(value.split("=", 1) for value in prior.get("Env", []))
+        new_defaults = dict(value.split("=", 1) for value in following.get("Env", []))
+        runtime_environment = dict(value.split("=", 1) for value in old["Config"]["Env"])
+        for name in old_defaults.keys() | new_defaults.keys():
+            if old_defaults.get(name) == new_defaults.get(name):
+                continue
+            if (
+                name in runtime_environment
+                and runtime_environment[name] != old_defaults.get(name)
+                and runtime_environment[name] != new_defaults.get(name)
+            ) or (
+                name in secret["environmentUpdates"] and secret["environmentUpdates"][name] != new_defaults.get(name)
+            ):
+                raise ValueError("Runtime override conflicts with nonroot image defaults: " + name)
+        preserved_environment = {
+            name: value for name, value in runtime_environment.items() if value != old_defaults.get(name)
+        }
+        environment = {**new_defaults, **preserved_environment, **secret["environmentUpdates"]}
+        candidate_body["Env"] = [name + "=" + value for name, value in environment.items()]
+        candidate_body["User"] = following["User"]
+        candidate_body["Entrypoint"] = following["Entrypoint"]
     candidate_name = "litellm-candidate-" + binding["deploymentId"]
     backup_name = "litellm-before-" + binding["deploymentId"]
     candidate_id = None
@@ -246,6 +291,8 @@ def replace(
         live = docker("GET", "/containers/litellm/json")
         if live["Id"] != candidate_id or live["Image"] != candidate_image["Id"] or not live["State"]["Running"]:
             raise ValueError("Candidate image or running state differs")
+        if any(live["Config"].get(key) != candidate_body.get(key) for key in startup_keys):
+            raise ValueError("Candidate startup differs from the reviewed configuration")
         if dict(value.split("=", 1) for value in live["Config"]["Env"]) != dict(
             value.split("=", 1) for value in candidate_body["Env"]
         ):
@@ -296,7 +343,10 @@ def replace(
         "containerId": candidate_id,
         "rollbackContainer": backup_name,
         "healthStatus": 200,
-        "launchSettingsPreserved": True,
+        "launchSettingsPreserved": not startup_changed,
+        "hostSettingsPreserved": True,
+        "runtimeMigration": "root-to-nonroot-v1" if startup_changed else "preserve",
+        "runtimeUser": candidate_body["User"],
         "registryCredentialDirectoryRemoved": True,
     }
 
