@@ -156,8 +156,8 @@ def runtime_secret(binding, environment):
         updates[name] = value
     if not updates or "\r" in content or "\x00" in content:
         raise ValueError("Invalid or empty runtime environment")
-    password = environment.get("DATABASE_PASSWORD", "")
-    reader_password = environment.get("DATABASE_PASSWORD_READ_REPLICA", "")
+    password = environment.get("LITELLM_DATABASE_PASSWORD", "")
+    reader_password = environment.get("LITELLM_DATABASE_PASSWORD_READ_REPLICA", "")
     if not password or any(c in password + reader_password for c in "\r\n\x00"):
         raise ValueError("A single-line database password is required")
     updates["DATABASE_PASSWORD"] = password

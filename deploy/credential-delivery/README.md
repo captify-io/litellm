@@ -10,7 +10,9 @@ Install `secret-delivery.yaml` with the selected host role, instance, publisher 
 
 Protect the release branch and the runtime file and password variables. Restrict each variable to its intended environment and disable expansion. Verify that the mirror can still update the protected release branch. Both CI debug tracing and the old password debugging option are refused
 
-`ENV_FILE` contains literal, unique `KEY=value` entries without shell evaluation. The job's `DATABASE_PASSWORD` takes precedence over a stale file value. An unset `DATABASE_PASSWORD_READ_REPLICA` clears a stale replica override so LiteLLM uses its writer-password fallback. Use an explicit replica password when the reader has a different database identity
+`ENV_FILE` contains literal, unique `KEY=value` entries without shell evaluation. The protected `LITELLM_DATABASE_PASSWORD` variable takes precedence over a stale file value. An unset `LITELLM_DATABASE_PASSWORD_READ_REPLICA` clears a stale replica override so LiteLLM uses its writer-password fallback. Use an explicit replica password when the reader has a different database identity
+
+Remove the selected environment's legacy `DATABASE_PASSWORD` CI variable after encrypted recovery is prepared. Older deployment scripts then stop at their required-password check instead of deploying a stale password or sending the replacement through command history
 
 The target reads only the pinned `AWSCURRENT` version and verifies its account, instance, deployment, image, and expiry. The reader policy denies historical or unspecified stages and another instance using the same role. The publisher expires the current envelope after the command completes, using an ownership check so it cannot expire a concurrent publisher's version. Encrypted historical versions remain under the account's retention and access policies
 

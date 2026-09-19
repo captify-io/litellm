@@ -61,7 +61,7 @@ class Delivery(unittest.TestCase):
             "CI_REGISTRY_IMAGE": "registry.example.test/team/litellm",
             "CI_PIPELINE_ID": "10",
             "CI_JOB_ID": "20",
-            "DATABASE_PASSWORD": "synthetic-db-password",
+            "LITELLM_DATABASE_PASSWORD": "synthetic-db-password",
             "CI_REGISTRY_USER": "test-user",
             "CI_REGISTRY_PASSWORD": "synthetic-password",
         }
@@ -157,12 +157,14 @@ class Delivery(unittest.TestCase):
         self.assertEqual(secret["environmentUpdates"]["DATABASE_PASSWORD"], "synthetic-db-password")
         self.assertEqual(secret["environmentUpdates"]["DATABASE_PASSWORD_READ_REPLICA"], "")
         self.assertEqual(secret["environmentUpdates"]["OTHER"], "preserve")
-        explicit = CI.runtime_secret(self.binding, {**self.env, "DATABASE_PASSWORD_READ_REPLICA": "separate-reader"})
+        explicit = CI.runtime_secret(
+            self.binding, {**self.env, "LITELLM_DATABASE_PASSWORD_READ_REPLICA": "separate-reader"}
+        )
         self.assertEqual(explicit["environmentUpdates"]["DATABASE_PASSWORD_READ_REPLICA"], "separate-reader")
         for changes in [
-            {"DATABASE_PASSWORD": ""},
-            {"DATABASE_PASSWORD": "bad\nvalue"},
-            {"DATABASE_PASSWORD_READ_REPLICA": "bad\rvalue"},
+            {"LITELLM_DATABASE_PASSWORD": ""},
+            {"LITELLM_DATABASE_PASSWORD": "bad\nvalue"},
+            {"LITELLM_DATABASE_PASSWORD_READ_REPLICA": "bad\rvalue"},
         ]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 CI.runtime_secret(self.binding, {**self.env, **changes})
