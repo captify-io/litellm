@@ -1,5 +1,3 @@
-
-
 import pytest
 
 import litellm
@@ -754,24 +752,34 @@ def test_a_baseline_that_prices_caching_implicitly_still_pays_for_its_prompt():
     assert reported > 0, "routing a cold first turn onto a cheaper model is a saving, not a loss"
 
 
-def test_a_baseline_with_no_cache_read_rate_is_charged_its_input_rate():
+def test_a_baseline_with_no_cache_read_rate_is_charged_its_input_rate(monkeypatch):
     """The same hole on the other bucket. A baseline whose entry has no
     `cache_read_input_token_cost` reads for 0.0, so a continuing turn priced the whole
     prompt at nothing and every switch away from it reported a loss.
     """
+    monkeypatch.setitem(
+        litellm.model_cost,
+        "xai/fixture-no-cache-read",
+        {
+            "litellm_provider": "xai",
+            "mode": "chat",
+            "input_cost_per_token": 3e-6,
+            "output_cost_per_token": 15e-6,
+        },
+    )
     continuing = _usage(fresh=0, cached=0, written=20_000, out=1_000)
     reported = compute_autorouter_savings(
-        baseline_model="xai/grok-4",
+        baseline_model="xai/fixture-no-cache-read",
         selected_model="claude-haiku-4-5",
         selected_provider="anthropic",
         usage=continuing,
         conversation_continuing=True,
     )
 
-    grok = litellm.get_model_info("grok-4", "xai")
-    assert grok.get("cache_read_input_token_cost") is None, "pick a baseline with no cache-read rate"
+    baseline = litellm.get_model_info("fixture-no-cache-read", "xai")
+    assert baseline.get("cache_read_input_token_cost") is None
     haiku = litellm.get_model_info("claude-haiku-4-5", "anthropic")
-    baseline_pays_input = 20_000 * grok["input_cost_per_token"] + 1_000 * grok["output_cost_per_token"]
+    baseline_pays_input = 20_000 * baseline["input_cost_per_token"] + 1_000 * baseline["output_cost_per_token"]
     actually_paid = 20_000 * haiku["cache_creation_input_token_cost"] + 1_000 * haiku["output_cost_per_token"]
     assert reported == pytest.approx(baseline_pays_input - actually_paid)
 

@@ -1,12 +1,11 @@
 import threading
 import time
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-pytest.importorskip("diskcache")
-
-from litellm.caching.disk_cache import DiskCache
+from litellm.caching.disk_cache import DiskCache, _JsonDiskStore
 
 
 class _SlowInt(int):
@@ -65,3 +64,103 @@ async def test_async_increment_adds_to_existing_int(cache):
 async def test_async_increment_treats_non_int_cached_value_as_zero(cache):
     await cache.async_set_cache("counter", "corrupt")
     assert await cache.async_increment("counter", 9) == 9
+
+
+def test_cache_survives_reopening_and_decodes_response_json(tmp_path):
+    first = DiskCache(str(tmp_path))
+    first.set_cache("response", '{"choices":[{"message":{"content":"hello"}}]}')
+    reopened = DiskCache(str(tmp_path))
+    assert reopened.get_cache("response") == {"choices": [{"message": {"content": "hello"}}]}
+    reopened.delete_cache("response")
+    assert first.get_cache("response") is None
+
+
+def test_expired_entry_is_absent_and_increment_restarts(tmp_path):
+    now = [100.0]
+    store = _JsonDiskStore(str(tmp_path), clock=lambda: now[0])
+    store.set("counter", 8, expire=10)
+    store.set("durable", {"valid": True})
+    now[0] = 110.0
+    assert store.get("counter") is None
+    assert store.increment("counter", 2, expire=5) == 2
+    now[0] = 115.0
+    assert store.get("counter") is None
+    assert store.get("durable") == {"valid": True}
+    store.clear()
+    assert store.get("durable") is None
+
+
+def test_increment_is_atomic_across_independent_store_connections(tmp_path):
+    stores = tuple(_JsonDiskStore(str(tmp_path)) for _ in range(8))
+    barrier = threading.Barrier(len(stores))
+
+    def increment(store):
+        barrier.wait()
+        for _ in range(30):
+            store.increment("counter", 1)
+
+    with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+        tuple(executor.map(increment, stores))
+    assert stores[0].get("counter") == 240
+
+
+def test_tampered_cache_content_is_never_unpickled(tmp_path):
+    marker = tmp_path / "executed"
+    payload = f"cos\nsystem\n(S'touch {marker}'\ntR."
+    store = _JsonDiskStore(str(tmp_path))
+    store.set("response", "safe")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE cache SET value = ? WHERE key = ?", (payload, "response"))
+    assert store.get("response") is None
+    assert not marker.exists()
+
+
+def test_legacy_pickle_database_is_not_opened(tmp_path):
+    legacy = tmp_path / "cache.db"
+    legacy.write_bytes(b"legacy pickle database must remain untouched")
+    cache = DiskCache(str(tmp_path))
+    cache.set_cache("fresh", {"message": "safe"})
+    assert cache.get_cache("fresh") == {"message": "safe"}
+    assert legacy.read_bytes() == b"legacy pickle database must remain untouched"
+
+
+def test_size_limit_evicts_oldest_entries_and_refuses_oversized_values(tmp_path):
+    now = [1.0]
+    store = _JsonDiskStore(str(tmp_path), clock=lambda: now[0], size_limit=16)
+    store.set("a", "12345")
+    now[0] = 2.0
+    store.set("b", "12345")
+    now[0] = 3.0
+    store.set("c", "12345")
+    assert store.get("a") is None
+    assert store.get("b") == "12345"
+    assert store.get("c") == "12345"
+    store.set("c", "x" * 17)
+    assert store.get("c") is None
+
+
+@pytest.mark.parametrize("value,expected", [(" 4 ", 6), ("-01", 2), ("null", 2), ("true", 3)])
+def test_increment_retains_json_string_value_semantics(cache, value, expected):
+    cache.set_cache("counter", value)
+    assert cache.increment_cache("counter", 2) == expected
+
+
+def test_new_cache_files_are_private(tmp_path):
+    store = _JsonDiskStore(str(tmp_path / "private"))
+    assert store.path.stat().st_mode & 0o777 == 0o600
+    assert store.directory.stat().st_mode & 0o777 == 0o700
+
+
+async def test_pipeline_and_batch_reads_keep_order(cache):
+    await cache.async_set_cache_pipeline([("a", {"answer": 42}), ("b", "plain")])
+    assert await cache.async_batch_get_cache(["b", "missing", "a"]) == ["plain", None, {"answer": 42}]
+    assert cache.batch_get_cache(["a", "b"]) == [{"answer": 42}, "plain"]
+
+
+def test_objects_requiring_pickle_are_rejected_without_serializing(cache):
+    class PickleOnly:
+        def __reduce__(self):
+            raise AssertionError("must not call a pickle hook")
+
+    with pytest.raises(TypeError, match="JSON serializable"):
+        cache.set_cache("unsupported", PickleOnly())

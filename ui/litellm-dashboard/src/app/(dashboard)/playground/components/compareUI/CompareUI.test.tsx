@@ -25,7 +25,8 @@ vi.mock("../chat_ui/ChatImageUpload", () => ({
   },
 }));
 
-vi.mock("../chat_ui/ChatImageUtils", () => ({
+vi.mock("../chat_ui/ChatImageUtils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../chat_ui/ChatImageUtils")>()),
   createChatMultimodalMessage: vi.fn().mockResolvedValue({
     role: "user",
     content: [

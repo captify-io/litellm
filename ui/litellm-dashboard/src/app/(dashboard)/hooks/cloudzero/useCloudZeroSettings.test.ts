@@ -57,6 +57,7 @@ describe("useCloudZeroSettings", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    mockGetProxyBaseUrl.mockReturnValue(mockProxyBaseUrl);
     queryClient = new QueryClient({
       defaultOptions: {
         queries: {
@@ -243,6 +244,7 @@ describe("useCloudZeroUpdateSettings", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    mockGetProxyBaseUrl.mockReturnValue(mockProxyBaseUrl);
     queryClient = new QueryClient({
       defaultOptions: {
         queries: {
@@ -484,6 +486,7 @@ describe("useCloudZeroDeleteSettings", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    mockGetProxyBaseUrl.mockReturnValue(mockProxyBaseUrl);
     queryClient = new QueryClient({
       defaultOptions: {
         queries: {

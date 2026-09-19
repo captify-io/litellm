@@ -1,0 +1,4 @@
+name: Complete source CodeQL scans
+
+queries:
+  - uses: security-and-quality
