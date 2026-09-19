@@ -10,6 +10,8 @@ a connection URL.
 
 import base64
 import json
+import os
+import urllib.parse
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -190,7 +192,9 @@ def test_build_url_inserts_the_token_verbatim():
 
 
 def test_build_url_preserves_duplicate_and_blank_options_without_reusing_credentials():
-    previous = "postgresql://other:OLD_TOKEN@old.example.com/old?sslmode=require&options=one&options=two&application_name="
+    previous = (
+        "postgresql://other:OLD_TOKEN@old.example.com/old?sslmode=require&options=one&options=two&application_name="
+    )
     endpoint = _endpoint()
 
     assert endpoint.build_url("NEW%2FTOKEN", previous_url=previous) == (
@@ -337,3 +341,142 @@ def test_an_unparseable_rds_expiry_degrades_instead_of_raising():
     absurd = "https://host/?X-Amz-Date=20260820T101500Z&X-Amz-Expires=99999999999999999999"
 
     assert parse_database_token_expiration(RdsIamTokenAuth(), absurd) is None
+
+
+@pytest.mark.parametrize("token_variable", ["AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"])
+def test_rds_environment_session_credentials_survive_presigning(token_variable):
+    from litellm.proxy.auth.rds_iam_token import generate_iam_auth_token
+
+    with patch.dict(
+        os.environ,
+        {
+            "AWS_ACCESS_KEY_ID": "test-session-access-key",
+            "AWS_SECRET_ACCESS_KEY": "test-session-secret-key",
+            token_variable: "session-one+/=",
+            "AWS_REGION_NAME": "us-east-1",
+            "AWS_EC2_METADATA_DISABLED": "true",
+        },
+        clear=True,
+    ):
+        for expected in ("session-one+/=", "session-two+/="):
+            with patch.dict(os.environ, {token_variable: expected}):
+                token = generate_iam_auth_token("db.example.com", "5432", "app")
+            query = urllib.parse.parse_qs(urllib.parse.unquote(token).split("?", 1)[1])
+            assert query.get("X-Amz-Security-Token") == [expected]
+            assert query["X-Amz-Credential"][0].startswith("test-session-access-key/")
+            assert query["DBUser"] == ["app"]
+
+
+@pytest.mark.parametrize("reference", [False, True])
+def test_rds_explicit_session_credentials_survive_presigning(reference):
+    from litellm.proxy.auth.rds_iam_token import generate_iam_auth_token, init_rds_client
+
+    with patch.dict(
+        os.environ,
+        {
+            "DB_ACCESS_KEY": "explicit-access-key",
+            "DB_SECRET_KEY": "explicit-secret-key",
+            "DB_SESSION_TOKEN": "explicit-session+/=",
+            "AWS_SESSION_TOKEN": "unrelated-ambient-token",
+            "AWS_EC2_METADATA_DISABLED": "true",
+        },
+        clear=True,
+    ):
+        client = init_rds_client(
+            aws_access_key_id="os.environ/DB_ACCESS_KEY" if reference else "explicit-access-key",
+            aws_secret_access_key="os.environ/DB_SECRET_KEY" if reference else "explicit-secret-key",
+            aws_session_token="os.environ/DB_SESSION_TOKEN" if reference else "explicit-session+/=",
+            aws_region_name="us-east-1",
+        )
+        token = generate_iam_auth_token("db.example.com", "5432", "app", client=client)
+        query = urllib.parse.parse_qs(urllib.parse.unquote(token).split("?", 1)[1])
+        assert query["X-Amz-Security-Token"] == ["explicit-session+/="]
+        assert query["X-Amz-Credential"][0].startswith("explicit-access-key/")
+
+
+def test_rds_long_term_credentials_do_not_inherit_an_unrelated_session_token():
+    from litellm.proxy.auth.rds_iam_token import generate_iam_auth_token, init_rds_client
+
+    with patch.dict(os.environ, {"AWS_SESSION_TOKEN": "unrelated-ambient-token"}, clear=True):
+        client = init_rds_client(
+            aws_access_key_id="long-term-access-key",
+            aws_secret_access_key="long-term-secret-key",
+            aws_region_name="us-east-1",
+        )
+        token = generate_iam_auth_token("db.example.com", "5432", "app", client=client)
+        query = urllib.parse.parse_qs(urllib.parse.unquote(token).split("?", 1)[1])
+        assert "X-Amz-Security-Token" not in query
+        assert query["X-Amz-Credential"][0].startswith("long-term-access-key/")
+
+
+@pytest.mark.parametrize("region", ["us-east-1", "us-gov-west-1"])
+@pytest.mark.parametrize("web_identity", [False, True])
+def test_rds_role_auth_keeps_region_and_session_credentials(region, web_identity, tmp_path):
+    import boto3
+    from botocore.stub import Stubber
+
+    from litellm.proxy.auth.rds_iam_token import init_rds_client
+
+    create_client = boto3.session.Session().client
+    captured_sts = []
+    partition = "aws-us-gov" if region.startswith("us-gov-") else "aws"
+    role_arn = f"arn:{partition}:iam::123456789012:role/database"
+    token_file = tmp_path / "identity-token"
+    token_file.write_text("test-web-identity-token")
+
+    def routed_client(service_name, **kwargs):
+        client = create_client(service_name, **kwargs)
+        if service_name == "sts":
+            captured_sts.append(client)
+            stubber = Stubber(client)
+            stubber.add_response(
+                "assume_role_with_web_identity" if web_identity else "assume_role",
+                {
+                    "Credentials": {
+                        "AccessKeyId": "assumed-access-key-1234",
+                        "SecretAccessKey": "assumed-secret-key",
+                        "SessionToken": "assumed-session-token",
+                        "Expiration": datetime(2030, 1, 1, tzinfo=timezone.utc),
+                    },
+                    "AssumedRoleUser": {
+                        "AssumedRoleId": "role-id:db-session",
+                        "Arn": f"arn:{partition}:sts::123456789012:assumed-role/database/db-session",
+                    },
+                },
+                {"RoleArn": role_arn, "RoleSessionName": "db-session"}
+                | ({"WebIdentityToken": "test-web-identity-token", "DurationSeconds": 3600} if web_identity else {}),
+            )
+            stubber.activate()
+        return client
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "AWS_DEFAULT_REGION": "us-east-1",
+                "AWS_ACCESS_KEY_ID": "ambient-access-key",
+                "AWS_SECRET_ACCESS_KEY": "ambient-secret-key",
+                "AWS_EC2_METADATA_DISABLED": "true",
+            },
+            clear=True,
+        ),
+        patch("boto3.client", side_effect=routed_client),
+    ):
+        client = init_rds_client(
+            aws_access_key_id="source-access-key",
+            aws_secret_access_key="source-secret-key",
+            aws_session_token="source-session-token",
+            aws_region_name=region,
+            aws_role_name=role_arn,
+            aws_session_name="db-session",
+            aws_web_identity_token=str(token_file) if web_identity else None,
+            timeout=5.0,
+        )
+    assert len(captured_sts) == 1
+    assert captured_sts[0].meta.region_name == region
+    assert captured_sts[0].meta.endpoint_url == f"https://sts.{region}.amazonaws.com"
+    assert captured_sts[0].meta.config.connect_timeout == 5.0
+    assert captured_sts[0].meta.config.read_timeout == 5.0
+    if not web_identity:
+        assert captured_sts[0]._request_signer._credentials.get_frozen_credentials().token == "source-session-token"
+    assert client._request_signer._credentials.get_frozen_credentials().token == "assumed-session-token"
