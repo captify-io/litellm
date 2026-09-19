@@ -22,13 +22,6 @@ variables:
   # Centralized CycloneDX JSON -> XLSX converter image (anautics-tools/cdx2xlsx)
   CDX2XLSX_IMAGE: "$CI_REGISTRY/anautics-tools/cdx2xlsx:1.0.1"
   DOCKER_CONFIG: "$CI_PROJECT_DIR/.docker"
-  LITELLM_HOST_PORT: "4000"
-  LITELLM_CONTAINER_PORT: "4000"
-  # Keep LiteLLM private to the instance so Captify Core can access it via localhost.
-  LITELLM_BIND_ADDRESS: "127.0.0.1"
-  LITELLM_AWS_REGION: "us-gov-west-1"
-  LITELLM_AWS_PARTITION: "aws-us-gov"
-  LITELLM_SSM_ROLE_NAME: "ansible-ssm-target-role"
 
 build-wheel:
   stage: build
@@ -346,301 +339,22 @@ security-release-gate:
       artifacts: false
     - job: security-release-gate
       artifacts: false
-  image:
-    name: public.ecr.aws/aws-cli/aws-cli:2.17.59
-    entrypoint: [""]
+  image: python:3.12-slim-bookworm
+  resource_group: litellm-$CI_ENVIRONMENT_NAME
+  interruptible: false
   before_script:
-    - mkdir -p "$DOCKER_CONFIG"
-    - aws --version
-    - echo "--- available LITELLM_* variables (names only) ---"
-    - printenv | grep -i 'LITELLM\|DEV_ENV\|STAGING_ENV\|PRODUCTION_ENV\|ENV_FILE' | sed 's/=.*/=<set>/' || true
-    - echo "---------------------------------------------------"
+    - test "${CI_DEBUG_TRACE:-false}" != "true"
+    - test "${DEBUG_DEPLOY_PASSWORD_FLOW:-false}" != "true"
+    - python3 -m pip install --require-hashes -r deploy/credential-delivery/requirements.txt
   script:
-    - 'test -n "$EC2_IDS" || (echo "FATAL: EC2_IDS is not set" && exit 1)'
-    - 'test -n "$AWS_ACCOUNT_ID" || (echo "FATAL: AWS_ACCOUNT_ID is not set" && exit 1)'
-    - 'test -n "$ENV_FILE" || (echo "FATAL: ENV_FILE is not set -- check that the GitLab variable is not Protected (Settings > CI/CD > Variables) or has wrong environment scope" && exit 1)'
-    - 'test -f "$ENV_FILE" || (echo "FATAL: ENV_FILE path is not a file: $ENV_FILE" && exit 1)'
-    - 'test -n "$LITELLM_AWS_REGION" || (echo "FATAL: LITELLM_AWS_REGION is not set" && exit 1)'
-    - 'test -n "$CI_REGISTRY_IMAGE" || (echo "FATAL: CI_REGISTRY_IMAGE is not set" && exit 1)'
-    - 'test -n "$CI_REGISTRY_USER" || (echo "FATAL: CI_REGISTRY_USER is not set" && exit 1)'
-    - 'test -n "$CI_REGISTRY_PASSWORD" || (echo "FATAL: CI_REGISTRY_PASSWORD is not set" && exit 1)'
-    - 'test -n "$DATABASE_PASSWORD" || (echo "FATAL: DATABASE_PASSWORD is not set -- define it in Settings > CI/CD > Variables and ensure scope/protection matches this pipeline" && exit 1)'
-
-    - echo "Assuming role in account $AWS_ACCOUNT_ID..."
-    - |
-      ROLE_CREDS=$(aws sts assume-role \
-        --role-arn "arn:${LITELLM_AWS_PARTITION}:iam::${AWS_ACCOUNT_ID}:role/${LITELLM_SSM_ROLE_NAME}" \
-        --role-session-name "GitLabCI-LiteLLM-Deploy-$(date +%s)" \
-        --region "$LITELLM_AWS_REGION" \
-        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-        --output text)
-      read -r TEMP_ACCESS_KEY TEMP_SECRET_KEY TEMP_SESSION_TOKEN <<EOF
-      $ROLE_CREDS
-      EOF
-      test -n "$TEMP_ACCESS_KEY" || (echo "FATAL: Failed to obtain STS credentials" && exit 1)
-      export AWS_ACCESS_KEY_ID="$TEMP_ACCESS_KEY"
-      export AWS_SECRET_ACCESS_KEY="$TEMP_SECRET_KEY"
-      export AWS_SESSION_TOKEN="$TEMP_SESSION_TOKEN"
-
-    - aws sts get-caller-identity --region "$LITELLM_AWS_REGION" >/dev/null
-
-    - |
-      echo "Confirming SSM registration for instances: $EC2_IDS"
-      for INSTANCE_ID in $(echo "$EC2_IDS" | tr ' ' '\n'); do
-        STATUS=$(aws ssm describe-instance-information \
-          --region "$LITELLM_AWS_REGION" \
-          --query "InstanceInformationList[?InstanceId=='$INSTANCE_ID'].PingStatus | [0]" \
-          --output text)
-        [ "$STATUS" = "Online" ] || (echo "FATAL: $INSTANCE_ID not Online in SSM" && exit 1)
-      done
-
-    - 'test -n "$LITELLM_BIND_ADDRESS" || (echo "FATAL: private bind address is required" && exit 1)'
-    - ENV_FILE_B64=$(base64 -w 0 "$ENV_FILE")
-    - |
-      if [ "${DEBUG_DEPLOY_PASSWORD_FLOW:-false}" = "true" ]; then
-        echo "DEBUG: DATABASE_PASSWORD is set: $([ -n "${DATABASE_PASSWORD:-}" ] && echo yes || echo no)"
-        echo "DEBUG: DATABASE_PASSWORD_READ_REPLICA is set: $([ -n "${DATABASE_PASSWORD_READ_REPLICA:-}" ] && echo yes || echo no)"
-        if [ -n "${DATABASE_PASSWORD:-}" ]; then
-          echo "DEBUG: DATABASE_PASSWORD length=${#DATABASE_PASSWORD}"
-          printf '%s' "$DATABASE_PASSWORD" | sha256sum | awk '{print "DEBUG: DATABASE_PASSWORD sha256=" $1}'
-          case "$DATABASE_PASSWORD" in
-            *$'\n'*) echo "DEBUG: DATABASE_PASSWORD contains newline characters" ;;
-          esac
-          case "$DATABASE_PASSWORD" in
-            *$'\r'*) echo "DEBUG: DATABASE_PASSWORD contains carriage-return characters" ;;
-          esac
-        fi
-        if [ -n "${DATABASE_PASSWORD_READ_REPLICA:-}" ]; then
-          echo "DEBUG: DATABASE_PASSWORD_READ_REPLICA length=${#DATABASE_PASSWORD_READ_REPLICA}"
-          printf '%s' "$DATABASE_PASSWORD_READ_REPLICA" | sha256sum | awk '{print "DEBUG: DATABASE_PASSWORD_READ_REPLICA sha256=" $1}'
-          case "$DATABASE_PASSWORD_READ_REPLICA" in
-            *$'\n'*) echo "DEBUG: DATABASE_PASSWORD_READ_REPLICA contains newline characters" ;;
-          esac
-          case "$DATABASE_PASSWORD_READ_REPLICA" in
-            *$'\r'*) echo "DEBUG: DATABASE_PASSWORD_READ_REPLICA contains carriage-return characters" ;;
-          esac
-        fi
-      fi
-
-      DATABASE_PASSWORD_B64=""
-      DATABASE_PASSWORD_READ_REPLICA_B64=""
-      DATABASE_PASSWORD_SHA256=""
-      DATABASE_PASSWORD_READ_REPLICA_SHA256=""
-      if [ -n "${DATABASE_PASSWORD:-}" ]; then
-        DATABASE_PASSWORD_B64=$(printf '%s' "$DATABASE_PASSWORD" | base64 -w 0)
-        DATABASE_PASSWORD_SHA256=$(printf '%s' "$DATABASE_PASSWORD" | sha256sum | awk '{print $1}')
-      fi
-      if [ -n "${DATABASE_PASSWORD_READ_REPLICA:-}" ]; then
-        DATABASE_PASSWORD_READ_REPLICA_B64=$(printf '%s' "$DATABASE_PASSWORD_READ_REPLICA" | base64 -w 0)
-        DATABASE_PASSWORD_READ_REPLICA_SHA256=$(printf '%s' "$DATABASE_PASSWORD_READ_REPLICA" | sha256sum | awk '{print $1}')
-      fi
-
-    - |
-      cat > deploy.sh <<EOF
-      #!/bin/bash
-      set -euo pipefail
-
-      DOCKER_REGISTRY="$CI_REGISTRY"
-      IMAGE_REPOSITORY="$CI_REGISTRY_IMAGE"
-      DOCKER_USER="$CI_REGISTRY_USER"
-      DOCKER_TOKEN="$CI_REGISTRY_PASSWORD"
-      DEBUG_DEPLOY_PASSWORD_FLOW="${DEBUG_DEPLOY_PASSWORD_FLOW:-false}"
-      DB_PASSWORD_B64="$DATABASE_PASSWORD_B64"
-      DB_PASSWORD_READ_REPLICA_B64="$DATABASE_PASSWORD_READ_REPLICA_B64"
-      DB_PASSWORD_SHA256="$DATABASE_PASSWORD_SHA256"
-      DB_PASSWORD_READ_REPLICA_SHA256="$DATABASE_PASSWORD_READ_REPLICA_SHA256"
-
-      IMAGE="$LITELLM_IMAGE"
-      case "\$IMAGE" in "\$IMAGE_REPOSITORY"@sha256:*) ;; *) exit 1 ;; esac
-
-      echo "Logging into Docker registry..."
-      echo "\$DOCKER_TOKEN" | docker login --username "\$DOCKER_USER" --password-stdin "\$DOCKER_REGISTRY"
-
-      echo "Pulling image \$IMAGE..."
-      docker pull "\$IMAGE"
-
-        ensure_env_file_ends_with_newline() {
-          if [ -s /litellm.env ] && [ "\$(tail -c1 /litellm.env | wc -l)" -eq 0 ]; then
-            printf '\n' >> /litellm.env
-          fi
-        }
-
-      RELEASE_DIR="/var/lib/litellm/releases/$CI_PIPELINE_ID"
-      umask 077
-      mkdir -p "\$RELEASE_DIR"
-      test ! -f "\$RELEASE_DIR/previous.env"
-      cp -p /litellm.env "\$RELEASE_DIR/previous.env"
-
-      PREVIOUS="litellm-rollback-$CI_PIPELINE_ID"
-      SWITCH_STARTED=false
-      rollback() {
-        result=\$?
-        trap - EXIT
-        if [ "\$result" -ne 0 ]; then
-          cp -p "\$RELEASE_DIR/previous.env" /litellm.env
-          if [ "\$SWITCH_STARTED" = true ]; then
-            docker rm -f litellm >/dev/null 2>&1 || true
-            docker rename "\$PREVIOUS" litellm
-          fi
-          docker update --restart always litellm >/dev/null
-          docker start litellm >/dev/null
-        fi
-        exit "\$result"
-      }
-      trap rollback EXIT
-      echo "Writing runtime environment file..."
-      echo "$ENV_FILE_B64" | base64 -d > /litellm.env
-      if [ "$DEBUG_DEPLOY_PASSWORD_FLOW" = "true" ]; then
-        echo "DEBUG: /litellm.env keys before injection (values redacted)"
-          awk -F= 'NF{print \$1 "=<redacted>"}' /litellm.env
-      fi
-      # Inject masked DB passwords from CI variables into the runtime env file.
-      sed -i '/^DATABASE_PASSWORD=/d' /litellm.env
-      sed -i '/^DATABASE_PASSWORD_READ_REPLICA=/d' /litellm.env
-      if [ -n "\$DB_PASSWORD_B64" ]; then
-        DB_PASSWORD=\$(printf '%s' "\$DB_PASSWORD_B64" | base64 -d)
-        ensure_env_file_ends_with_newline
-        printf 'DATABASE_PASSWORD=%s\n' "\$DB_PASSWORD" >> /litellm.env
-        if [ "\$DEBUG_DEPLOY_PASSWORD_FLOW" = "true" ]; then
-              DB_PASSWORD_ACTUAL_SHA256=\$(printf '%s' "\$DB_PASSWORD" | sha256sum | cut -d ' ' -f1 | tr -d '\r\n[:space:]')
-            DB_PASSWORD_EXPECTED_SHA256=\$(printf '%s' "\$DB_PASSWORD_SHA256" | tr -d '\r\n[:space:]')
-            echo "DEBUG: remote DATABASE_PASSWORD sha256=\$DB_PASSWORD_ACTUAL_SHA256"
-            echo "DEBUG: expected DATABASE_PASSWORD sha256=\$DB_PASSWORD_EXPECTED_SHA256"
-            [ "\$DB_PASSWORD_ACTUAL_SHA256" = "\$DB_PASSWORD_EXPECTED_SHA256" ] || { echo "FATAL: DATABASE_PASSWORD hash mismatch between CI and remote host"; exit 1; }
-        fi
-        #if awk -F= '{ key=\$1; sub(/\r$/, "", key); if (key=="DATABASE_PASSWORD") found=1 } END{ exit(found?0:1) }' /litellm.env; then
-        #  echo "Injected DATABASE_PASSWORD into runtime env file (masked in CI logs)"
-        #else
-        #  echo "FATAL: DATABASE_PASSWORD injection into /litellm.env failed"
-        #  exit 1
-        #fi
-      fi
-      if [ -n "\$DB_PASSWORD_READ_REPLICA_B64" ]; then
-        DB_PASSWORD_READ_REPLICA=\$(printf '%s' "\$DB_PASSWORD_READ_REPLICA_B64" | base64 -d)
-        ensure_env_file_ends_with_newline
-        printf 'DATABASE_PASSWORD_READ_REPLICA=%s\n' "\$DB_PASSWORD_READ_REPLICA" >> /litellm.env
-        if [ "\$DEBUG_DEPLOY_PASSWORD_FLOW" = "true" ]; then
-              DB_PASSWORD_READ_REPLICA_ACTUAL_SHA256=\$(printf '%s' "\$DB_PASSWORD_READ_REPLICA" | sha256sum | cut -d ' ' -f1 | tr -d '\r\n[:space:]')
-            DB_PASSWORD_READ_REPLICA_EXPECTED_SHA256=\$(printf '%s' "\$DB_PASSWORD_READ_REPLICA_SHA256" | tr -d '\r\n[:space:]')
-            echo "DEBUG: remote DATABASE_PASSWORD_READ_REPLICA sha256=\$DB_PASSWORD_READ_REPLICA_ACTUAL_SHA256"
-            echo "DEBUG: expected DATABASE_PASSWORD_READ_REPLICA sha256=\$DB_PASSWORD_READ_REPLICA_EXPECTED_SHA256"
-            [ "\$DB_PASSWORD_READ_REPLICA_ACTUAL_SHA256" = "\$DB_PASSWORD_READ_REPLICA_EXPECTED_SHA256" ] || { echo "FATAL: DATABASE_PASSWORD_READ_REPLICA hash mismatch between CI and remote host"; exit 1; }
-        fi
-        #if awk -F= '{ key=\$1; sub(/\r$/, "", key); if (key=="DATABASE_PASSWORD_READ_REPLICA") found=1 } END{ exit(found?0:1) }' /litellm.env; then
-        #  echo "Injected DATABASE_PASSWORD_READ_REPLICA into runtime env file (masked in CI logs)"
-        #else
-        #  echo "FATAL: DATABASE_PASSWORD_READ_REPLICA injection into /litellm.env failed"
-        #  exit 1
-        #fi
-      fi
-      if [ "$DEBUG_DEPLOY_PASSWORD_FLOW" = "true" ]; then
-        echo "DEBUG: /litellm.env keys after injection (values redacted)"
-          awk -F= 'NF{print \$1 "=<redacted>"}' /litellm.env
-        echo "DEBUG: DATABASE_PASSWORD entries in /litellm.env: \$(awk -F= '{ key=\$1; sub(/\r$/, "", key); if (key=="DATABASE_PASSWORD") c++ } END{print c+0}' /litellm.env)"
-        echo "DEBUG: DATABASE_PASSWORD_READ_REPLICA entries in /litellm.env: \$(awk -F= '{ key=\$1; sub(/\r$/, "", key); if (key=="DATABASE_PASSWORD_READ_REPLICA") c++ } END{print c+0}' /litellm.env)"
-      fi
-      chmod 600 /litellm.env
-
-      docker inspect litellm >/dev/null
-      docker update --restart no litellm >/dev/null
-      docker stop --time 60 litellm >/dev/null
-      docker rename litellm "\$PREVIOUS"
-      SWITCH_STARTED=true
-
-      echo "Running LiteLLM container on ${LITELLM_BIND_ADDRESS}:${LITELLM_HOST_PORT} -> ${LITELLM_CONTAINER_PORT}..."
-      docker run \
-        --name litellm \
-        --network captify-net \
-        --restart always \
-        --env-file /litellm.env \
-        --publish ${LITELLM_BIND_ADDRESS}:${LITELLM_HOST_PORT}:${LITELLM_CONTAINER_PORT} \
-        --detach "\$IMAGE" \
-        --port "${LITELLM_CONTAINER_PORT}"
-
-      if [ -n "\$DB_PASSWORD_B64" ]; then
-        CONTAINER_ENV=\$(docker inspect litellm --format '{{range .Config.Env}}{{println .}}{{end}}')
-        if printf '%s\n' "\$CONTAINER_ENV" | grep -q '^DATABASE_PASSWORD='; then
-          echo "Verified DATABASE_PASSWORD present in running container env (value masked)"
-        else
-          echo "FATAL: DATABASE_PASSWORD missing from running container env"
-          exit 1
-        fi
-      fi
-      if [ -n "\$DB_PASSWORD_READ_REPLICA_B64" ]; then
-        CONTAINER_ENV=\$(docker inspect litellm --format '{{range .Config.Env}}{{println .}}{{end}}')
-        if printf '%s\n' "\$CONTAINER_ENV" | grep -q '^DATABASE_PASSWORD_READ_REPLICA='; then
-          echo "Verified DATABASE_PASSWORD_READ_REPLICA present in running container env (value masked)"
-        else
-          echo "FATAL: DATABASE_PASSWORD_READ_REPLICA missing from running container env"
-          exit 1
-        fi
-      fi
-
-      HEALTHY=false
-      test "\$(docker inspect litellm --format '{{.HostConfig.PortBindings}}')" != 'map[]'
-      for attempt in {1..90}; do
-        if curl --fail --silent --max-time 3 "http://${LITELLM_BIND_ADDRESS}:${LITELLM_HOST_PORT}/health/readiness" >/dev/null; then
-          HEALTHY=true
-          break
-        fi
-        sleep 2
-      done
-      [ "\$HEALTHY" = true ] || { echo 'FATAL: LiteLLM readiness failed; restoring previous container'; exit 1; }
-      [ "\$(docker inspect litellm --format '{{.Config.Image}}')" = "\$IMAGE" ]
-      docker inspect litellm --format '{{.Id}} {{.Config.Image}} {{.State.Status}}' > "\$RELEASE_DIR/deployment.txt"
-      trap - EXIT
-      echo 'LiteLLM readiness and immutable image verification passed; previous container retained for rollback'
-      EOF
-
-    - chmod +x deploy.sh
-    - |
-      DEPLOY_COMMANDS=$(awk '{gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); printf "%s\\n", $0}' deploy.sh | sed ':a;N;$!ba;s/\n/\\n/g')
-      printf '{"commands":["%s"]}\n' "$DEPLOY_COMMANDS" > deploy-params.json
-
-      COMMAND_ID=$(aws ssm send-command \
-        --region "$LITELLM_AWS_REGION" \
-        --instance-ids $EC2_IDS \
-        --document-name "AWS-RunShellScript" \
-        --comment "LiteLLM deploy via GitLab" \
-        --parameters file://deploy-params.json \
-        --query "Command.CommandId" \
-        --output text)
-
-      echo "SSM Command ID: $COMMAND_ID"
-      export COMMAND_ID
-
-    - |
-      WAIT_EXIT=0
-      for INSTANCE_ID in $(echo "$EC2_IDS" | tr ' ' '\n'); do
-        aws ssm wait command-executed \
-          --region "$LITELLM_AWS_REGION" \
-          --command-id "$COMMAND_ID" \
-          --instance-id "$INSTANCE_ID" || WAIT_EXIT=$?
-      done
-
-      for INSTANCE_ID in $(echo "$EC2_IDS" | tr ' ' '\n'); do
-        echo "========== [SSM OUTPUT for $INSTANCE_ID] =========="
-        aws ssm get-command-invocation \
-          --region "$LITELLM_AWS_REGION" \
-          --command-id "$COMMAND_ID" \
-          --instance-id "$INSTANCE_ID" \
-          --query '{Status:Status,StandardOutput:StandardOutputContent,StandardError:StandardErrorContent}' \
-          --output text || true
-        echo "==============================================="
-      done
-
-      if [ $WAIT_EXIT -ne 0 ]; then
-        echo "Deployment failed (SSM waiter exit code: $WAIT_EXIT)"
-        exit 1
-      fi
+    - python3 -m unittest discover -s tests/credential_delivery -v
+    - python3 deploy/credential-delivery/publish.py
 
 deploy-dev:
   extends: .deploy_template
   variables:
-    AWS_ACCOUNT_ID: "$DEV_ACCOUNT_ID"
-    EC2_IDS: "$DEV_INSTANCE_IDS"
+    DEPLOY_CONFIG: "$DEV_DEPLOYMENT_CONFIG"
     ENV_FILE: "$LITELLM_DEV_ENV"
-    LITELLM_BIND_ADDRESS: "$DEV_LITELLM_BIND_ADDRESS"
   environment:
     name: dev
   rules:
@@ -653,8 +367,7 @@ deploy-dev:
 deploy-staging:
   extends: .deploy_template
   variables:
-    AWS_ACCOUNT_ID: "$STAGING_ACCOUNT_ID"
-    EC2_IDS: "$STAGING_INSTANCE_IDS"
+    DEPLOY_CONFIG: "$STAGING_DEPLOYMENT_CONFIG"
     ENV_FILE: "$LITELLM_STAGING_ENV"
   environment:
     name: staging
@@ -668,8 +381,7 @@ deploy-staging:
 deploy-production:
   extends: .deploy_template
   variables:
-    AWS_ACCOUNT_ID: "$PRODUCTION_ACCOUNT_ID"
-    EC2_IDS: "$PRODUCTION_INSTANCE_IDS"
+    DEPLOY_CONFIG: "$PRODUCTION_DEPLOYMENT_CONFIG"
     ENV_FILE: "$LITELLM_PRODUCTION_ENV"
   environment:
     name: production

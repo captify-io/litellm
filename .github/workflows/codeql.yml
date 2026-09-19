@@ -8,6 +8,7 @@ on:
   schedule:
     # Run daily at 04:00 UTC
     - cron: "0 4 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,7 +16,6 @@ concurrency:
 
 jobs:
   analyze:
-    if: github.event_name != 'schedule' || github.repository == 'BerriAI/litellm'
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -31,9 +31,15 @@ jobs:
         include:
           - language: actions
             build-mode: none
+          - language: go
+            build-mode: autobuild
           - language: javascript-typescript
             build-mode: none
           - language: python
+            build-mode: none
+          - language: ruby
+            build-mode: none
+          - language: rust
             build-mode: none
 
     steps:
@@ -47,7 +53,11 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          config-file: ./.github/codeql/codeql-config.yml
+          config-file: ${{ matrix.language == 'python' && './.github/codeql/codeql-config.yml' || './.github/codeql/codeql-all-sources.yml' }}
+
+      - name: Build compiled languages
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@ebcb5b36ded6beda4ceefea6a8bc4cc885255bb3 # v3.34.1
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@ebcb5b36ded6beda4ceefea6a8bc4cc885255bb3 # v3.34.1

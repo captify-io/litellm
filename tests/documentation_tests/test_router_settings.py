@@ -1,81 +1,31 @@
-import os
-import re
 import inspect
-from typing import Type
+import re
+from pathlib import Path
+from typing import Final
 
 import litellm
 
 
-def get_init_params(cls: Type) -> list[str]:
-    """
-    Retrieve all parameters supported by the `__init__` method of a given class.
-
-    Args:
-        cls: The class to inspect.
-
-    Returns:
-        A list of parameter names.
-    """
-    if not hasattr(cls, "__init__"):
-        raise ValueError(
-            f"The provided class {cls.__name__} does not have an __init__ method."
-        )
-
-    init_method = cls.__init__
-    argspec = inspect.getfullargspec(init_method)
-
-    # The first argument is usually 'self', so we exclude it
-    return argspec.args[1:]  # Exclude 'self'
-
-
-router_init_params = set(get_init_params(litellm.router.Router))
-print(router_init_params)
-router_init_params.remove("model_list")
-
-# Parse the documentation to extract documented keys
-_test_dir = os.path.dirname(os.path.abspath(__file__))
-_repo_root = os.path.abspath(os.path.join(_test_dir, "..", ".."))
-print(os.listdir(_repo_root))
-docs_path = os.path.join(
-    _repo_root, "docs", "my-website", "docs", "proxy", "config_settings.md"
-)
-documented_keys = set()
-try:
-    with open(docs_path, "r", encoding="utf-8") as docs_file:
-        content = docs_file.read()
-
-        # Find the section titled "general_settings - Reference"
-        general_settings_section = re.search(
-            r"### router_settings - Reference(.*?)###", content, re.DOTALL
-        )
-        if general_settings_section:
-            # Extract the table rows, which contain the documented keys
-            table_content = general_settings_section.group(1)
-            doc_key_pattern = re.compile(
-                r"\|\s*([^\|]+?)\s*\|"
-            )  # Capture the key from each row of the table
-            documented_keys.update(doc_key_pattern.findall(table_content))
-except Exception as e:
-    raise Exception(
-        f"Error reading documentation: {e}, \n repo base - {os.listdir(_repo_root)}"
+def extract_documented_router_keys(content: str) -> frozenset[str]:
+    section: Final = re.search(
+        r"^### router_settings - Reference\s*\n(.*?)(?=^### |\Z)",
+        content,
+        re.MULTILINE | re.DOTALL,
     )
+    if section is None:
+        raise ValueError("Missing router_settings - Reference section")
+    return frozenset(re.findall(r"^\s*\|\s*`?([a-z][a-z0-9_]*)`?\s*\|", section.group(1), re.MULTILINE))
 
 
-# Compare and find undocumented keys
-undocumented_keys = router_init_params - documented_keys
+def main() -> None:
+    parameters: Final = frozenset(inspect.signature(litellm.router.Router.__init__).parameters) - {"self", "model_list"}
+    docs_path: Final = Path(__file__).resolve().parents[2] / "docs/my-website/docs/proxy/config_settings.md"
+    documented: Final = extract_documented_router_keys(docs_path.read_text(encoding="utf-8"))
+    missing: Final = parameters - documented
+    if missing:
+        raise ValueError(f"Keys not documented in 'router settings - Reference': {sorted(missing)}")
+    print(f"All {len(parameters)} router settings are documented")
 
-# Print results
-print("Keys expected in 'router settings' (found in code):")
-for key in sorted(router_init_params):
-    print(key)
 
-if undocumented_keys:
-    raise Exception(
-        f"\nKeys not documented in 'router settings - Reference': {undocumented_keys}"
-    )
-else:
-    print(
-        "\nAll keys are documented in 'router settings - Reference'. - {}".format(
-            router_init_params
-        )
-    )
+if __name__ == "__main__":
+    main()

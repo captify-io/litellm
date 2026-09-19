@@ -129,6 +129,7 @@ jobs:
         if: steps.changes.outputs.decision != 'skip'
         timeout-minutes: ${{ inputs.timeout-minutes }}
         env:
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
           TEST_PATH: ${{ inputs.test-path }}
           MAX_FAILURES: ${{ inputs.max-failures }}
           WORKERS: ${{ inputs.workers }}
