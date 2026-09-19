@@ -348,7 +348,7 @@ class Delivery(unittest.TestCase):
         self.assertEqual(result["Hostname"], "")
         self.assertEqual(old["Config"]["Env"][0], "TEST_ACCESS_ID=old")
 
-    def rollout(self, failure=None):
+    def rollout(self, failure=None, dependencies=False):
         old = self.old_container()
         original = copy.deepcopy(old)
         state = {old["Id"]: old}
@@ -388,6 +388,15 @@ class Delivery(unittest.TestCase):
             else:
                 raise AssertionError(path)
 
+        def before_switch():
+            history.append(("DEPENDENCY", "rotate", None))
+            if failure == "dependency":
+                raise RuntimeError("Dependency transition failed")
+
+        def rollback_dependency():
+            history.append(("DEPENDENCY", "rollback", None))
+
+        hooks = {"before_switch": before_switch, "rollback_dependency": rollback_dependency} if dependencies else {}
         binding = {**self.binding, "mode": "credentials", "releaseImage": IMAGE}
         runtime = self.root / "litellm.env"
         runtime.write_text("original-runtime-file")
@@ -406,9 +415,9 @@ class Delivery(unittest.TestCase):
         ):
             if failure:
                 with self.assertRaises(RuntimeError):
-                    TARGET.replace(binding, self.secret, recovery, runtime)
+                    TARGET.replace(binding, self.secret, recovery, runtime, **hooks)
             else:
-                receipt = TARGET.replace(binding, self.secret, recovery, runtime)
+                receipt = TARGET.replace(binding, self.secret, recovery, runtime, **hooks)
                 self.assertEqual(receipt["imageId"], IMAGE)
                 self.assertTrue(receipt["launchSettingsPreserved"])
                 for name, value in self.secret["environmentUpdates"].items():
@@ -427,6 +436,29 @@ class Delivery(unittest.TestCase):
         original, state, history, runtime = self.rollout("health")
         self.assertEqual(state, {original["Id"]: original})
         self.assertEqual(runtime.read_text(), "original-runtime-file")
+
+    def test_dependency_transition_happens_after_staging_and_before_service_stop(self):
+        original, state, history, runtime = self.rollout(dependencies=True)
+        paths = [path for _, path, _ in history]
+        self.assertLess(
+            next(i for i, p in enumerate(paths) if p.startswith("/containers/create")), paths.index("rotate")
+        )
+        self.assertLess(paths.index("rotate"), next(i for i, p in enumerate(paths) if "/stop" in p))
+        self.assertNotIn("rollback", paths)
+
+    def test_dependency_failure_restores_dependency_without_stopping_original(self):
+        original, state, history, runtime = self.rollout("dependency", dependencies=True)
+        self.assertEqual(state, {original["Id"]: original})
+        paths = [path for _, path, _ in history]
+        self.assertIn("rollback", paths)
+        self.assertFalse(any("/stop" in p for p in paths))
+        self.assertEqual(runtime.read_text(), "original-runtime-file")
+
+    def test_health_failure_restores_dependency_before_original_service(self):
+        original, state, history, runtime = self.rollout("health", dependencies=True)
+        self.assertEqual(state, {original["Id"]: original})
+        paths = [path for _, path, _ in history]
+        self.assertLess(paths.index("rollback"), paths.index("/containers/" + original["Id"] + "/start"))
 
     def test_success_keeps_original_stopped_and_preserves_runtime_configuration(self):
         original, state, history, runtime = self.rollout()

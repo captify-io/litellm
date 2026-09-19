@@ -12,6 +12,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from typing import Callable
 
 
 def execute(arguments, *, environment=None, input_text=None, timeout=90):
@@ -177,7 +178,18 @@ def wait_healthy(binding):
     raise RuntimeError("Service health did not recover")
 
 
-def replace(binding, secret, recovery, runtime=Path("/litellm.env")):
+def unchanged_dependency() -> None:
+    return None
+
+
+def replace(
+    binding,
+    secret,
+    recovery,
+    runtime=Path("/litellm.env"),
+    before_switch: Callable[[], None] = unchanged_dependency,
+    rollback_dependency: Callable[[], None] = unchanged_dependency,
+):
     old = docker("GET", "/containers/litellm/json")
     validate_current(old, binding)
     if not healthy(binding):
@@ -212,6 +224,7 @@ def replace(binding, secret, recovery, runtime=Path("/litellm.env")):
     candidate_id = None
     interrupted = False
     runtime_changed = False
+    dependency_attempted = False
     try:
         candidate_id = docker("POST", "/containers/create?name=" + candidate_name, candidate_body)["Id"]
         current = docker("GET", "/containers/litellm/json")
@@ -221,6 +234,8 @@ def replace(binding, secret, recovery, runtime=Path("/litellm.env")):
             or current["HostConfig"] != old["HostConfig"]
         ):
             raise ValueError("Live container changed during candidate staging")
+        dependency_attempted = True
+        before_switch()
         interrupted = True
         docker("POST", "/containers/" + old["Id"] + "/update", {"RestartPolicy": {"Name": "no"}})
         docker("POST", "/containers/" + old["Id"] + "/stop?t=30")
@@ -250,6 +265,8 @@ def replace(binding, secret, recovery, runtime=Path("/litellm.env")):
         finally:
             staged_path.unlink(missing_ok=True)
     except BaseException:
+        if dependency_attempted:
+            rollback_dependency()
         if candidate_id:
             docker("DELETE", "/containers/" + candidate_id + "?force=true")
         if interrupted:
