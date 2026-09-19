@@ -14,6 +14,7 @@ ENV_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 DOCS_BASE = "./docs/my-website/docs"
+RUNTIME_DOCS_BASE = "./docs/runtime"
 REFERENCE_TABLE_PATH = f"{DOCS_BASE}/proxy/config_settings.md"
 DOCS_SUFFIXES = (".md", ".mdx")
 DOCUMENTED_KEY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]*\b")
@@ -115,7 +116,7 @@ def main() -> None:
     if not os.path.isdir(DOCS_BASE):
         raise Exception(f"No documentation found at {DOCS_BASE}; check out BerriAI/litellm-docs into docs/my-website")
 
-    undocumented_keys = undocumented_env_keys(repo_base, DOCS_BASE)
+    undocumented_keys = undocumented_env_keys(repo_base, DOCS_BASE) - collect_documented_keys(RUNTIME_DOCS_BASE)
     if undocumented_keys:
         raise Exception(
             f"Environment variables read under {repo_base} but mentioned nowhere in the docs: "

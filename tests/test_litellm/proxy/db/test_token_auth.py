@@ -480,3 +480,67 @@ def test_rds_role_auth_keeps_region_and_session_credentials(region, web_identity
     if not web_identity:
         assert captured_sts[0]._request_signer._credentials.get_frozen_credentials().token == "source-session-token"
     assert client._request_signer._credentials.get_frozen_credentials().token == "assumed-session-token"
+
+
+@pytest.mark.parametrize(
+    ("database_role", "database_session", "expected_role", "expected_session"),
+    [
+        (None, None, "service", "service-session"),
+        (None, "unused-session", "service", "service-session"),
+        ("database", None, "database", "litellm-database"),
+        ("database", "database-session", "database", "database-session"),
+    ],
+)
+def test_database_role_selection_preserves_other_service_settings(
+    database_role, database_session, expected_role, expected_session
+):
+    import boto3
+    from botocore.stub import Stubber
+
+    from litellm.proxy.auth.rds_iam_token import generate_iam_auth_token
+
+    create_client = boto3.session.Session().client
+    role_prefix = "arn:aws-us-gov:iam::123456789012:role/"
+    environment = {
+        "AWS_ACCESS_KEY_ID": "source-access-key-1234",
+        "AWS_SECRET_ACCESS_KEY": "source-secret-key",
+        "AWS_SESSION_TOKEN": "source-session-token",
+        "AWS_REGION_NAME": "us-gov-west-1",
+        "AWS_ROLE_NAME": role_prefix + "service",
+        "AWS_SESSION_NAME": "service-session",
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+    if database_role:
+        environment["DATABASE_AWS_ROLE_ARN"] = role_prefix + database_role
+    if database_session:
+        environment["DATABASE_AWS_ROLE_SESSION_NAME"] = database_session
+
+    def routed_client(service_name, **kwargs):
+        client = create_client(service_name, **kwargs)
+        if service_name == "sts":
+            stubber = Stubber(client)
+            stubber.add_response(
+                "assume_role",
+                {
+                    "Credentials": {
+                        "AccessKeyId": "database-access-key-1234",
+                        "SecretAccessKey": "database-secret-key",
+                        "SessionToken": "database-session-token",
+                        "Expiration": datetime(2030, 1, 1, tzinfo=timezone.utc),
+                    },
+                    "AssumedRoleUser": {
+                        "AssumedRoleId": "role-id:" + expected_session,
+                        "Arn": f"arn:aws-us-gov:sts::123456789012:assumed-role/{expected_role}/{expected_session}",
+                    },
+                },
+                {"RoleArn": role_prefix + expected_role, "RoleSessionName": expected_session},
+            )
+            stubber.activate()
+        return client
+
+    with patch.dict(os.environ, environment, clear=True), patch("boto3.client", side_effect=routed_client):
+        token = generate_iam_auth_token("db.example.com", "5432", "app")
+        assert dict(os.environ) == environment
+    query = urllib.parse.parse_qs(urllib.parse.unquote(token).split("?", 1)[1])
+    assert query["X-Amz-Security-Token"] == ["database-session-token"]
+    assert query["X-Amz-Credential"][0].startswith("database-access-key-1234/")
