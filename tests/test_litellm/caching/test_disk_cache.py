@@ -8,6 +8,12 @@ import pytest
 from litellm.caching.disk_cache import DiskCache, _JsonDiskStore
 
 
+@pytest.fixture(autouse=True)
+def cache_root(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LITELLM_DISK_CACHE_ROOT", raising=False)
+
+
 class _SlowInt(int):
     def __add__(self, value: int) -> "_SlowInt":
         time.sleep(0.05)
@@ -164,3 +170,46 @@ def test_objects_requiring_pickle_are_rejected_without_serializing(cache):
 
     with pytest.raises(TypeError, match="JSON serializable"):
         cache.set_cache("unsupported", PickleOnly())
+
+
+@pytest.mark.parametrize("relative", [True, False])
+def test_cache_rejects_paths_outside_the_operator_root(tmp_path, relative):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    directory = f"../{outside.name}" if relative else str(outside)
+    with pytest.raises(ValueError, match="inside LITELLM_DISK_CACHE_ROOT"):
+        DiskCache(directory)
+    assert not outside.exists()
+
+
+def test_operator_root_accepts_normalized_descendants(tmp_path, monkeypatch):
+    root = tmp_path / "persistent"
+    monkeypatch.setenv("LITELLM_DISK_CACHE_ROOT", str(root))
+    cache = DiskCache("tenant/../tenant/responses")
+    cache.set_cache("response", {"answer": 42})
+    assert cache.disk_cache.directory == root / "tenant/responses"
+    assert DiskCache(str(root / "tenant/responses")).get_cache("response") == {"answer": 42}
+
+
+def test_cache_rejects_directory_symlinks_leaving_the_root(tmp_path, monkeypatch):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("LITELLM_DISK_CACHE_ROOT", str(root))
+    with pytest.raises(ValueError, match="inside LITELLM_DISK_CACHE_ROOT"):
+        DiskCache("linked")
+    assert not (outside / "litellm-json-cache.sqlite3").exists()
+
+
+def test_cache_rejects_a_symlinked_database_without_changing_its_target(tmp_path):
+    target = tmp_path / "protected"
+    target.write_bytes(b"leave this untouched")
+    (tmp_path / "litellm-json-cache.sqlite3").symlink_to(target)
+    with pytest.raises(ValueError, match="must not be a symbolic link"):
+        DiskCache(str(tmp_path))
+    assert target.read_bytes() == b"leave this untouched"
+
+
+def test_disk_cache_initializes_the_base_ttl(cache):
+    assert cache.get_ttl(ttl="invalid") == 60

@@ -2,7 +2,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -19,9 +19,15 @@ else:
 
 class _JsonDiskStore:
     def __init__(self, directory: str, *, clock: Callable[[], float] = time.time, size_limit: int = 2**30) -> None:
-        self.directory = Path(directory)
+        root: Final = os.path.realpath(os.environ.get("LITELLM_DISK_CACHE_ROOT", os.getcwd()))
+        resolved: Final = os.path.realpath(os.path.join(root, directory))
+        if resolved != root and not resolved.startswith(root.rstrip(os.sep) + os.sep):
+            raise ValueError("Disk cache directory must remain inside LITELLM_DISK_CACHE_ROOT")
+        self.directory = Path(resolved)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.directory / "litellm-json-cache.sqlite3"
+        if self.path.is_symlink():
+            raise ValueError("Disk cache database must not be a symbolic link")
         try:
             descriptor: Final = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
         except FileExistsError:
@@ -37,7 +43,7 @@ class _JsonDiskStore:
             )
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
+    def _transaction(self) -> Generator[sqlite3.Connection, None, None]:
         with closing(sqlite3.connect(self.path, timeout=60, isolation_level=None)) as connection:
             connection.execute("PRAGMA trusted_schema = OFF")
             connection.execute("BEGIN IMMEDIATE")
@@ -111,6 +117,7 @@ def _decode_response(value: object) -> object:
 
 class DiskCache(BaseCache):
     def __init__(self, disk_cache_dir: str | None = None):
+        super().__init__()
         self.disk_cache = _JsonDiskStore(disk_cache_dir or ".litellm_cache")
 
     def set_cache(self, key, value, **kwargs):
