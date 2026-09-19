@@ -111,7 +111,7 @@ dashboard-sbom:
     - npm install -g @cyclonedx/cyclonedx-npm@4.0.0
     - npm ci
   script:
-    - cyclonedx-npm --output-file dashboard-sbom.json --output-format JSON --sv 1.6
+    - cyclonedx-npm --package-lock-only --output-file dashboard-sbom.json --output-format JSON --sv 1.6
     - mv dashboard-sbom.json ../../dashboard-sbom.json
   artifacts:
     paths:
