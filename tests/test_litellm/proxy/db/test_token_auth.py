@@ -491,8 +491,9 @@ def test_rds_role_auth_keeps_region_and_session_credentials(region, web_identity
         ("database", "database-session", "database", "database-session"),
     ],
 )
+@pytest.mark.parametrize("database_region", [None, "us-gov-east-1"])
 def test_database_role_selection_preserves_other_service_settings(
-    database_role, database_session, expected_role, expected_session
+    database_role, database_session, expected_role, expected_session, database_region
 ):
     import boto3
     from botocore.stub import Stubber
@@ -510,6 +511,8 @@ def test_database_role_selection_preserves_other_service_settings(
         "AWS_SESSION_NAME": "service-session",
         "AWS_EC2_METADATA_DISABLED": "true",
     }
+    if database_region:
+        environment["DATABASE_AWS_REGION_NAME"] = database_region
     if database_role:
         environment["DATABASE_AWS_ROLE_ARN"] = role_prefix + database_role
     if database_session:
@@ -544,3 +547,4 @@ def test_database_role_selection_preserves_other_service_settings(
     query = urllib.parse.parse_qs(urllib.parse.unquote(token).split("?", 1)[1])
     assert query["X-Amz-Security-Token"] == ["database-session-token"]
     assert query["X-Amz-Credential"][0].startswith("database-access-key-1234/")
+    assert "/" + (database_region or "us-gov-west-1") + "/rds-db/" in query["X-Amz-Credential"][0]
