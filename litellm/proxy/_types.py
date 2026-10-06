@@ -531,6 +531,9 @@ class LiteLLMRoutes(enum.Enum):
     # The handlers in agent_endpoints/endpoints.py enforce proxy-admin on writes and
     # scope reads by role, so these also appear in self_managed_routes.
     agent_management_routes = (
+        "/captify/v1/agents",
+        "/captify/v1/agents/{agent_id}",
+        "/captify/v1/agent-authoring-capabilities",
         "/v1/agents",
         "/v1/agents/{agent_id}",
         "/v1/agents/make_public",

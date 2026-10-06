@@ -848,31 +848,49 @@ async def test_get_fuzzy_user_object():
         where={"sso_user_id": "sso_123"}, include={"organization_memberships": True}
     )
 
-    # Test 2: SSO ID not found, find by email
     mock_prisma.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
-    mock_prisma.db.litellm_usertable.find_first = AsyncMock(return_value=test_user)
-    mock_prisma.db.litellm_usertable.update = AsyncMock()
+    mock_prisma.db.litellm_usertable.find_many = AsyncMock(return_value=[test_user])
+    mock_prisma.db.litellm_usertable.update_many = AsyncMock(return_value=1)
+
+    with pytest.raises(ValueError, match="already belongs to another subject"):
+        await _get_fuzzy_user_object(
+            prisma_client=mock_prisma,
+            sso_user_id="new_sso_456",
+            user_email="test@example.com",
+        )
+    mock_prisma.db.litellm_usertable.update_many.assert_not_awaited()
+
+    unbound_user = test_user.model_copy(update={"sso_user_id": None})
+    linked_user = test_user.model_copy(update={"sso_user_id": "new_sso_456"})
+    mock_prisma.db.litellm_usertable.find_many = AsyncMock(return_value=[unbound_user])
+    mock_prisma.db.litellm_usertable.find_unique = AsyncMock(side_effect=[None, linked_user])
 
     result = await _get_fuzzy_user_object(
         prisma_client=mock_prisma,
         sso_user_id="new_sso_456",
         user_email="test@example.com",
     )
-    assert result == test_user
-    mock_prisma.db.litellm_usertable.find_first.assert_called_with(
+    assert result == linked_user
+    mock_prisma.db.litellm_usertable.find_many.assert_awaited_once_with(
         where={"user_email": {"equals": "test@example.com", "mode": "insensitive"}},
         include={"organization_memberships": True},
+        take=2,
     )
-
-    # Test 3: Verify background SSO update task when user found by email
-    await asyncio.sleep(0.1)  # Allow time for background task
-    mock_prisma.db.litellm_usertable.update.assert_called_with(
-        where={"user_id": "test_123"}, data={"sso_user_id": "new_sso_456"}
+    mock_prisma.db.litellm_usertable.update_many.assert_awaited_once_with(
+        where={
+            "user_id": "test_123",
+            "sso_user_id": None,
+            "user_email": {"equals": "test@example.com", "mode": "insensitive"},
+        },
+        data={"sso_user_id": "new_sso_456"},
+    )
+    mock_prisma.db.litellm_usertable.find_unique.assert_awaited_with(
+        where={"user_id": "test_123"}, include={"organization_memberships": True}
     )
 
     # Test 4: User not found by either method
     mock_prisma.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
-    mock_prisma.db.litellm_usertable.find_first = AsyncMock(return_value=None)
+    mock_prisma.db.litellm_usertable.find_many = AsyncMock(return_value=[])
 
     result = await _get_fuzzy_user_object(
         prisma_client=mock_prisma,
@@ -882,14 +900,15 @@ async def test_get_fuzzy_user_object():
     assert result is None
 
     # Test 5: Only email provided (no SSO ID)
-    mock_prisma.db.litellm_usertable.find_first = AsyncMock(return_value=test_user)
+    mock_prisma.db.litellm_usertable.find_many = AsyncMock(return_value=[test_user])
     result = await _get_fuzzy_user_object(
         prisma_client=mock_prisma, user_email="test@example.com"
     )
     assert result == test_user
-    mock_prisma.db.litellm_usertable.find_first.assert_called_with(
+    mock_prisma.db.litellm_usertable.find_many.assert_awaited_once_with(
         where={"user_email": {"equals": "test@example.com", "mode": "insensitive"}},
         include={"organization_memberships": True},
+        take=2,
     )
 
     # Test 6: Only SSO ID provided (no email)

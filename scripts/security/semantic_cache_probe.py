@@ -7,12 +7,14 @@ import importlib.metadata
 import itertools
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Final
+from unittest.mock import patch
 
 SOURCE_HASHES: Final = {
     "litellm/caching/caching.py": "f27189528a4c5fbf6910ad1ceaf422c794666541d25a0d5686b65e9ee7862ccc",
-    "litellm/proxy/litellm_pre_call_utils.py": "e911b500b614d324a0fac6d7566aca3f07a46c4ecea4635ef807f45d7082ee67",
+    "litellm/proxy/litellm_pre_call_utils.py": "0f2815d73f139228a0e685e64d84c4d2869be0733bfd97ab205bfe88bb1dffec",
 }
 VERSION: Final = "1.100.0"
 PATHS: Final = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/bedrock/model/test/converse")
@@ -109,7 +111,70 @@ async def behavior() -> dict[str, int]:
     )
     if shared_keys[0] != shared_keys[1]:
         raise ValueError("Backport changed the existing shared-key semantics")
-    return {"tenantScopeCases": 36, "authenticatedRouteCases": 8, "sharedKeyCases": 1}
+    await verify_http_cache_overrides()
+    return {"tenantScopeCases": 36, "authenticatedRouteCases": 8, "sharedKeyCases": 1, "httpCacheOverrideCases": 8}
+
+
+async def verify_http_cache_overrides() -> None:
+    from fastapi import Request
+
+    import litellm
+    from litellm.caching.caching import Cache
+    from litellm.caching.caching_handler import LLMCachingHandler
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.litellm_pre_call_utils import add_litellm_data_to_request
+    from litellm.proxy.proxy_server import ProxyConfig
+    from litellm.types.caching import LiteLLMCacheType
+
+    def refuse_model(**_kwargs: object) -> None:
+        raise ValueError("The installed cache proof must not call a model")
+
+    for path, nested in itertools.product(PATHS, (False, True)):
+        request: Final = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "scheme": "http",
+                "path": path,
+                "query_string": b"",
+                "headers": [],
+                "server": ("synthetic.invalid", 80),
+                "client": ("127.0.0.1", 1234),
+            }
+        )
+        cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
+        cache.type = LiteLLMCacheType.VALKEY_SEMANTIC
+
+        async def key(identity: str, current_request: Request, nested_override: bool) -> str:
+            override: Final = (
+                {"litellm_params": {"preset_cache_key": "forged-shared", "metadata": {"trace_id": "retained"}}}
+                if nested_override
+                else {"cache_key": "forged-shared"}
+            )
+            data: Final = await add_litellm_data_to_request(
+                data={"model": "synthetic-model", "messages": [{"role": "user", "content": "same"}], **override},
+                request=current_request,
+                user_api_key_dict=UserAPIKeyAuth(api_key=identity),
+                proxy_config=ProxyConfig(),
+                general_settings={},
+                version="backport-proof",
+            )
+            if nested_override and data.get("litellm_params") != {"metadata": {"trace_id": "retained"}}:
+                raise ValueError("HTTP cache sanitization lost unrelated nested parameters")
+            handler: Final = LLMCachingHandler(
+                original_function=refuse_model, request_kwargs=data, start_time=datetime.now()
+            )
+            await handler._retrieve_from_cache(call_type="acompletion", kwargs=data, args=())
+            if handler.preset_cache_key is None or handler.preset_cache_key == "forged-shared":
+                raise ValueError("HTTP cache override bypassed authenticated scope")
+            return handler.preset_cache_key
+
+        with patch.object(litellm, "cache", cache):
+            first: Final = await key("synthetic-authenticated-a", request, nested)
+            if first == await key("synthetic-authenticated-b", request, nested) or first != await key(
+                "synthetic-authenticated-a", request, nested
+            ):
+                raise ValueError("HTTP cache overrides do not isolate authenticated identities")
 
 
 def main() -> None:

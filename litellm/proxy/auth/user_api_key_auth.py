@@ -908,8 +908,22 @@ async def _auto_register_jwt_mapping(
     return auto_registered_key
 
 
+def _require_verified_email_key_mapping(
+    jwt_claims: Mapping[str, object],
+    jwt_handler: JWTHandler,
+    virtual_key_claim_field: str,
+    claim_value: object,
+) -> None:
+    if (
+        claim_value is not None
+        and jwt_handler.is_email_identity_field(jwt_claims, virtual_key_claim_field)
+        and not jwt_handler.is_verified_email(jwt_claims, claim_value)
+    ):
+        raise HTTPException(status_code=403, detail="JWT Key Mapping: Verified canonical email required.")
+
+
 async def _resolve_jwt_to_virtual_key(
-    jwt_claims: dict,
+    jwt_claims: dict[str, object],
     jwt_handler: JWTHandler,
     prisma_client: PrismaClient | None,
     user_api_key_cache: UserApiKeyCache,
@@ -940,6 +954,8 @@ async def _resolve_jwt_to_virtual_key(
         key_path=virtual_key_claim_field,
         default=None,
     )
+
+    _require_verified_email_key_mapping(jwt_claims, jwt_handler, virtual_key_claim_field, claim_value)
 
     if claim_value is None:
         verbose_proxy_logger.debug(
@@ -1374,7 +1390,7 @@ async def _user_api_key_auth_builder(
                 pending_auto_register: _PendingAutoRegister | None = None
                 if jwt_handler.litellm_jwtauth.virtual_key_claim_field is not None:
                     # Decode JWT to get claims without running full auth_builder
-                    jwt_claims: dict | None
+                    jwt_claims: dict[str, object] | None
                     if jwt_handler.litellm_jwtauth.oidc_userinfo_enabled and not is_jwt:
                         jwt_claims = await jwt_handler.get_oidc_userinfo(token=api_key)
                     else:

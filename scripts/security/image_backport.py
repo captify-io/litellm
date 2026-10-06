@@ -24,7 +24,7 @@ CVE: Final = "CVE-2026-89032"
 ALIASES: Final = frozenset((CVE, "GHSA-237m-2qxv-ww7c"))
 PURL: Final = "pkg:pypi/litellm@1.100.0"
 IMAGE_RE: Final = re.compile(r"127\.0\.0\.1:([0-9]{1,5})/litellm@sha256:([a-f0-9]{64})")
-CASES: Final = {"tenantScopeCases": 36, "authenticatedRouteCases": 8, "sharedKeyCases": 1}
+CASES: Final = {"tenantScopeCases": 36, "authenticatedRouteCases": 8, "sharedKeyCases": 1, "httpCacheOverrideCases": 8}
 
 
 def require(condition: bool, message: str) -> None:

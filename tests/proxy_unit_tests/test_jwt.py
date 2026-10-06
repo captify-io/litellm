@@ -991,6 +991,7 @@ async def test_allow_access_by_email(
         "client_id": team_id,
         "aud": "litellm-proxy",
         "email": user_email,
+        "email_verified": True,
     }
 
     # Generate the JWT token
@@ -1041,7 +1042,7 @@ async def test_allow_access_by_email(
             assert result is not None  # Adjust this based on your actual response check
         else:
             # Expect the call to fail
-            with pytest.raises(ProxyException):
+            with pytest.raises(ProxyException, match="Email domain not allowed"):
                 await user_api_key_auth(request=request, api_key=bearer_token)
 
 
@@ -1993,6 +1994,7 @@ async def test_global_jwt_ignores_user_supplied_internal_claims(monkeypatch):
         kid="global-key",
         extra_claims={
             "email": "real-user@example.com",
+            "email_verified": True,
             "team": {"id": "real-team"},
             "teams": ["real-team", "secondary-team"],
             "org": {"id": "real-org"},
@@ -2052,6 +2054,7 @@ async def test_multi_issuer_jwt_strips_unmapped_internal_claims(monkeypatch):
         kid="issuer-key",
         extra_claims={
             "email": "real-user@example.com",
+            "email_verified": True,
             JWTHandler.LITELLM_USER_ID_CLAIM: "victim-user",
             JWTHandler.LITELLM_TEAM_ID_CLAIM: "victim-team",
         },

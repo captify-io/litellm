@@ -40,6 +40,8 @@ COPY --from=uvbin /uvx /usr/local/bin/uvx
 
 RUN for i in 1 2 3; do \
       apk add --no-cache \
+        libcrypto3=3.6.5-r1 \
+        libssl3=3.6.5-r1 \
         python3 \
         python3-dev \
         gcc \
@@ -50,7 +52,9 @@ RUN for i in 1 2 3; do \
         openssl \
         libsndfile \
         nodejs \
-        npm && break || sleep 5; \
+        npm && break; \
+      [ "$i" = 3 ] && { echo "apk add failed after 3 retries" >&2; exit 1; }; \
+      sleep 5; \
     done
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
@@ -125,10 +129,15 @@ WORKDIR /app
 USER root
 
 RUN for i in 1 2 3; do \
-      apk upgrade --no-cache && break || sleep 5; \
+      apk upgrade --no-cache && break; \
+      [ "$i" = 3 ] && { echo "apk upgrade failed after 3 retries" >&2; exit 1; }; \
+      sleep 5; \
     done && \
     for i in 1 2 3; do \
-      apk add --no-cache python3 bash openssl tzdata libsndfile nodejs && break || sleep 5; \
+      apk add --no-cache python3 bash openssl tzdata libsndfile nodejs \
+        libcrypto3=3.6.5-r1 libssl3=3.6.5-r1 && break; \
+      [ "$i" = 3 ] && { echo "apk add failed after 3 retries" >&2; exit 1; }; \
+      sleep 5; \
     done
 
 # Copy only what runtime needs. The application is installed inside the venv;

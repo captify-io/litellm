@@ -11,6 +11,8 @@ CreateContainerConfigError because the kubelet cannot resolve
 
 import os
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -49,6 +51,54 @@ def test_final_user_directive_is_numeric():
     )
 
     assert int(final_user) != 0, (
-        f"Dockerfile.non_root final USER is {final_user} (root); the non_root image "
-        "must run as a non-zero UID."
+        f"Dockerfile.non_root final USER is {final_user} (root); the non_root image must run as a non-zero UID."
     )
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    ("Dockerfile", "docker/Dockerfile.non_root", "gateway/Dockerfile", "backend/Dockerfile", "migrations/Dockerfile"),
+)
+@pytest.mark.parametrize("failed_command", ("add", "upgrade", ""))
+def test_wolfi_package_install_requires_fixed_legacy_libraries_and_fails_closed(
+    dockerfile: str, failed_command: str, tmp_path: Path
+):
+    contents = (Path(__file__).resolve().parents[2] / dockerfile).read_text()
+    commands = tuple(
+        command
+        for command in re.findall(r"^RUN (.+)$", contents.replace("\\\n", ""), re.MULTILINE)
+        if "apk add --no-cache" in command and "python3" in command
+    )
+    assert len(commands) == 2
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    apk = fake_bin / "apk"
+    apk.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$APK_CALLS"\nif [ "$1" = "$APK_FAIL_COMMAND" ]; then exit 1; fi\nexit 0\n'
+    )
+    apk.chmod(0o755)
+    sleep = fake_bin / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    for index, command in enumerate(commands):
+        calls = tmp_path / f"calls-{index}.txt"
+        result = subprocess.run(
+            ("sh", "-c", command),
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "APK_CALLS": str(calls),
+                "APK_FAIL_COMMAND": failed_command,
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert (result.returncode != 0) == bool(failed_command and f"apk {failed_command} " in command), (
+            result.stdout,
+            result.stderr,
+        )
+        if failed_command != "upgrade" or "apk upgrade " not in command:
+            added = tuple(line.split() for line in calls.read_text().splitlines() if line.startswith("add "))
+            assert added
+            assert all("libcrypto3=3.6.5-r1" in call and "libssl3=3.6.5-r1" in call for call in added)
