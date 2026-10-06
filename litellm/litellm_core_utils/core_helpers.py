@@ -573,7 +573,7 @@ def filter_exceptions_from_params(data: Any, max_depth: int = 20) -> Any:
         return data
 
 
-def filter_internal_params(data: dict, additional_internal_params: set | None = None) -> dict:
+def filter_internal_params(data: dict, additional_internal_params: set | frozenset[str] | None = None) -> dict:
     """
     Filter out LiteLLM internal parameters that shouldn't be sent to provider APIs.
 

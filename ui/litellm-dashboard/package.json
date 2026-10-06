@@ -107,15 +107,15 @@
     "axios": "1.13.6",
     "postcss": "8.5.23",
     "esbuild": "0.28.1",
-    "sharp": "^0.35.5",
+    "sharp": "0.35.5",
     "browserslist": "^4.28.7",
     "js-yaml@^3": "^3.15.2",
     "js-yaml@^4": "^4.3.2",
     "brace-expansion@^1": "^1.1.16",
     "brace-expansion@^2": "^2.1.1",
-    "brace-expansion@^5": "^5.0.12",
+    "brace-expansion@^5": "5.0.12",
     "form-data@^4": "^4.0.6",
-    "smol-toml": "^1.9.0",
+    "smol-toml": "1.9.0",
     "source-map-js": "1.2.2"
   },
   "engines": {

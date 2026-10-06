@@ -264,6 +264,7 @@ _UNTRUSTED_ROOT_CONTROL_FIELDS: Final = (
 )
 
 _UNTRUSTED_METADATA_CONTROL_FIELDS: Final = (
+    "user_api_key",
     "disable_global_guardrails",
     "disable_global_guardrail",
     "opted_out_global_guardrails",

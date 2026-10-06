@@ -19,6 +19,10 @@ on:
       - docker/component_entrypoint.sh
       - docker/entrypoint.sh
       - litellm/proxy/prisma_migration.py
+      - litellm/caching/caching.py
+      - litellm/proxy/litellm_pre_call_utils.py
+      - scripts/security/**
+      - tests/code_coverage_tests/test_image_backport.py
       - litellm-proxy-extras/**
       - tests/proxy_migration_tests/**
       - uv.lock
@@ -63,7 +67,10 @@ jobs:
       # Dockerfiles share the same wolfi base and apk set, so OS-layer coverage
       # is the same; matrix-scan if those variants ever diverge.
       - name: Build runtime image
-        run: docker build -f docker/Dockerfile.non_root -t litellm-image-scan:${{ github.sha }} .
+        run: >-
+          docker build -f docker/Dockerfile.non_root
+          --label org.opencontainers.image.revision=${{ github.sha }}
+          -t litellm-image-scan:${{ github.sha }} .
 
       # The prisma bake must migrate a fresh DB with no egress as an arbitrary
       # non-root uid (OpenShift restricted-v2 / air-gapped / readOnlyRootFilesystem).
@@ -82,20 +89,54 @@ jobs:
           python -m pip install "pytest==9.0.3"
           python -m pytest tests/proxy_migration_tests/test_offline_image_migration.py -v
 
+      - name: Verify backport attestation rejection controls
+        run: python tests/code_coverage_tests/test_image_backport.py -v
+
       # Scans the whole shipped artifact: OS/apk plus every language package
       # baked into the image, including ones no lockfile declares (e.g. prisma's
       # vendored node engine) that osv-scan cannot see. osv-scan stays the fast
       # source-level gate; this is the customer's-eye-view backstop. Credential-
       # free OSS, run as a pinned, checksum-verified binary; no GitHub Action
       # dependency and no vendor SaaS callout.
-      - name: Scan image for fixable HIGH/CRITICAL CVEs
-        env:
-          GRYPE_MATCH_PYTHON_USING_CPES: "true"
+      - name: Give the built image a job-local immutable registry digest
+        id: image-digest
         run: |
-          "$RUNNER_TEMP/grype" litellm-image-scan:${{ github.sha }} \
-            --only-fixed \
-            --fail-on high \
-            --output table
+          set -euo pipefail
+          docker run --detach --name litellm-vex-registry \
+            --publish 127.0.0.1::5000 --env OTEL_TRACES_EXPORTER=none \
+            registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
+          address="$(docker port litellm-vex-registry 5000/tcp)"
+          [[ "$address" =~ ^127\.0\.0\.1:[0-9]+$ ]]
+          for attempt in {1..20}; do
+            if curl --fail --silent "http://$address/v2/"; then break; fi
+            sleep 1
+          done
+          curl --fail --silent "http://$address/v2/"
+          docker tag litellm-image-scan:${{ github.sha }} "$address/litellm:scan"
+          docker push "$address/litellm:scan"
+          digest="$(docker image inspect "$address/litellm:scan" --format '{{index .RepoDigests 0}}')"
+          echo "reference=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Prove installed backport and scan with exact-image OpenVEX
+        env:
+          IMAGE_REFERENCE: ${{ steps.image-digest.outputs.reference }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          python scripts/security/image_backport.py \
+            --image "$IMAGE_REFERENCE" --source-revision "$SOURCE_REVISION" \
+            --grype "$RUNNER_TEMP/grype" --output "$RUNNER_TEMP/image-backport"
+
+      - name: Retain raw findings, exact-image VEX, and installed proof
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: image-backport-${{ github.sha }}
+          path: ${{ runner.temp }}/image-backport/
+          if-no-files-found: warn
+
+      - name: Remove the job-local registry
+        if: always()
+        run: docker rm --force --volumes litellm-vex-registry || true
 
   runtime-image:
     name: runtime-image

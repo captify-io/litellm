@@ -6927,6 +6927,26 @@ class TestPromotedTraceControlFields:
         assert litellm_metadata["trace_id"] == "trace-1"
         assert litellm_metadata.get("user_api_key_user_id") != "forged"
 
+    @pytest.mark.parametrize("path", ["/v1/responses", "/v1/messages", "/bedrock/model/test/converse"])
+    @pytest.mark.parametrize("encoded", [False, True])
+    @pytest.mark.asyncio
+    async def test_bare_key_hash_cannot_override_authenticated_cache_identity(self, path, encoded):
+        injected = {"user_api_key": "forged-victim", "trace_id": "kept-trace"}
+        updated = await self._run(
+            path,
+            {
+                "model": "test-model",
+                "input": "A private question",
+                "metadata": json.dumps(injected) if encoded else dict(injected),
+                "litellm_metadata": json.dumps(injected) if encoded else dict(injected),
+            },
+        )
+
+        assert "user_api_key" not in updated["metadata"]
+        assert "user_api_key" not in updated["litellm_metadata"]["requester_metadata"]
+        assert updated["litellm_metadata"]["user_api_key"] == "hashed-key"
+        assert updated["litellm_metadata"]["trace_id"] == "kept-trace"
+
     @pytest.mark.asyncio
     async def test_chat_completions_route_is_untouched(self):
         updated = await self._run(
