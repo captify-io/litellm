@@ -908,6 +908,20 @@ async def _auto_register_jwt_mapping(
     return auto_registered_key
 
 
+def _require_verified_email_key_mapping(
+    jwt_claims: Mapping[str, object],
+    jwt_handler: JWTHandler,
+    virtual_key_claim_field: str,
+    claim_value: object,
+) -> None:
+    if (
+        claim_value is not None
+        and jwt_handler.is_email_identity_field(jwt_claims, virtual_key_claim_field)
+        and not jwt_handler.is_verified_email(jwt_claims, claim_value)
+    ):
+        raise HTTPException(status_code=403, detail="JWT Key Mapping: Verified canonical email required.")
+
+
 async def _resolve_jwt_to_virtual_key(
     jwt_claims: dict[str, object],
     jwt_handler: JWTHandler,
@@ -941,12 +955,7 @@ async def _resolve_jwt_to_virtual_key(
         default=None,
     )
 
-    if (
-        claim_value is not None
-        and jwt_handler.is_email_identity_field(jwt_claims, virtual_key_claim_field)
-        and not jwt_handler.is_verified_email(jwt_claims, claim_value)
-    ):
-        raise HTTPException(status_code=403, detail="JWT Key Mapping: Verified canonical email required.")
+    _require_verified_email_key_mapping(jwt_claims, jwt_handler, virtual_key_claim_field, claim_value)
 
     if claim_value is None:
         verbose_proxy_logger.debug(
