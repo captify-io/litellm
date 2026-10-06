@@ -23,7 +23,7 @@ npm audit
 
 The local archive is a direct development dependency aliased as `braces`; the `$braces` override makes every transitive consumer use that same artifact. npm 11 resolves a standalone relative `file:` override against the transitive package in some existing lockfiles, so the direct dependency reference is intentional. The lockfile includes the actual downstream name, version, local path and SHA512 integrity. A clean install requires the checked-in archive, with registry dependencies available online or in npm's cache
 
-The normal build and local dashboard checks explicitly run `check:braces`. This does not rely on an install lifecycle hook, which the project's `ignore-scripts=true` would disable. All three Docker UI builders copy the vendor directory before `npm ci` and provide `patch`; the resulting production image still serves the static UI export
+The normal build and local dashboard checks explicitly run `check:braces`. This does not rely on an install lifecycle hook, which the project's `ignore-scripts=true` would disable. All four Docker UI builders copy the vendor directory before `npm ci` and provide `patch`; the resulting production image still serves the static UI export
 
 ## Scanner interpretation and maintenance
 
