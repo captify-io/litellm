@@ -60,12 +60,17 @@ class TestRequestCompliance:
     """Tests that our request bodies match the OpenAPI spec."""
 
     def test_create_model_interaction_request_schema(self, spec_dict):
-        """Verify CreateModelInteractionParams schema fields."""
-        schema = spec_dict["components"]["schemas"]["CreateModelInteractionParams"]
+        """Verify writable fields on the current ModelInteraction request variant."""
+        schema = spec_dict["components"]["schemas"]["ModelInteraction"]
 
-        # Required fields per spec
+        request_schema = spec_dict["paths"]["/{api_version}/interactions"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+        assert {"$ref": "#/components/schemas/ModelInteraction"} in request_schema["oneOf"]
         assert "model" in schema["required"]
-        assert "input" in schema["required"]
+        assert not schema["properties"]["model"].get("readOnly", False)
+        assert "input" in schema["properties"]
+        assert not schema["properties"]["input"].get("readOnly", False)
 
         # Check our supported optional fields exist in spec
         our_optional_fields = [
@@ -88,7 +93,7 @@ class TestRequestCompliance:
 
     def test_input_types_match_spec(self, spec_dict):
         """Verify input field supports string, Content, Content[], Turn[]."""
-        schema = spec_dict["components"]["schemas"]["CreateModelInteractionParams"]
+        schema = spec_dict["components"]["schemas"]["ModelInteraction"]
         input_schema = schema["properties"]["input"]
 
         # The input property may be inline oneOf or a $ref to InteractionsInput
@@ -313,7 +318,7 @@ class TestEndpointCompliance:
 
         get_path = None
         for path, methods in paths.items():
-            if "{id}" in path and "interactions" in path and "get" in methods:
+            if path == "/{api_version}/interactions/{interactionsId}" and "get" in methods:
                 get_path = path
                 break
 
@@ -326,7 +331,7 @@ class TestEndpointCompliance:
 
         delete_path = None
         for path, methods in paths.items():
-            if "{id}" in path and "interactions" in path and "delete" in methods:
+            if path == "/{api_version}/interactions/{interactionsId}" and "delete" in methods:
                 delete_path = path
                 break
 
