@@ -1,7 +1,11 @@
 import asyncio
 import json
 import os
+import struct
+from typing import Final
+import zlib
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -10,7 +14,151 @@ from unittest.mock import MagicMock, patch
 import litellm
 from litellm import ModelResponse, RateLimitError, completion
 from litellm.llms.bedrock.chat.converse_transformation import AmazonConverseConfig
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.types.llms.bedrock import ConverseTokenUsageBlock
+
+
+@pytest.mark.parametrize("drop_params", [False, True])
+def test_client_metadata_is_not_forwarded_to_converse(drop_params: bool) -> None:
+    config: Final = AmazonConverseConfig()
+    client_metadata: Final = {"originator": "codex"}
+    request_metadata: Final = {"request_id": "synthetic-request"}
+    guardrail: Final = {"guardrailIdentifier": "synthetic-guardrail", "guardrailVersion": "1"}
+    user_metadata: Final = {"user_id": "synthetic-user"}
+    optional_params: Final = {
+        "client_metadata": client_metadata,
+        "metadata": user_metadata,
+        "requestMetadata": request_metadata,
+        "guardrailConfig": guardrail,
+        "maxTokens": 128,
+        "stopSequences": ["end-of-answer"],
+        "tools": [{"type": "function", "function": {"name": "echo", "parameters": {"type": "object"}}}],
+        "tool_choice": {"tool": {"name": "echo"}},
+    }
+    request: Final = config.transform_request(
+        model="us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        messages=[{"role": "user", "content": "Call echo."}],
+        optional_params=optional_params,
+        litellm_params={"drop_params": drop_params},
+        headers={},
+    )
+
+    assert "client_metadata" not in request.get("additionalModelRequestFields", {})
+    assert request["additionalModelRequestFields"]["metadata"] == user_metadata
+    assert request["requestMetadata"] == request_metadata
+    assert request["guardrailConfig"] == guardrail
+    assert request["inferenceConfig"]["maxTokens"] == 128
+    assert request["inferenceConfig"]["stopSequences"] == ["end-of-answer"]
+    assert request["toolConfig"]["tools"][0]["toolSpec"]["name"] == "echo"
+    assert request["toolConfig"]["toolChoice"] == {"tool": {"name": "echo"}}
+    assert optional_params["client_metadata"] == client_metadata
+
+
+def _converse_stream_event(event_type: str, payload: str) -> bytes:
+    headers: Final = b"".join(
+        bytes([len(name)]) + name.encode() + b"\x07" + struct.pack("!H", len(value)) + value.encode()
+        for name, value in (
+            (":message-type", "event"),
+            (":event-type", event_type),
+            (":content-type", "application/json"),
+        )
+    )
+    body: Final = payload.encode()
+    prelude: Final = struct.pack("!II", 16 + len(headers) + len(body), len(headers))
+    message: Final = prelude + struct.pack("!I", zlib.crc32(prelude)) + headers + body
+    return message + struct.pack("!I", zlib.crc32(message))
+
+
+@pytest.mark.asyncio
+async def test_responses_client_metadata_converse_streamed_tool_roundtrip() -> None:
+    def provider(request: httpx.Request) -> httpx.Response:
+        body: Final = json.loads(request.content)
+        assert request.url.host == "bedrock-runtime.us-gov-west-1.amazonaws.com"
+        assert request.url.path.endswith("/converse-stream")
+        assert "client_metadata" not in body.get("additionalModelRequestFields", {})
+        assert body["requestMetadata"] == {"request_id": "synthetic-request"}
+        assert body["inferenceConfig"]["maxTokens"] == 128
+        assert body["toolConfig"]["tools"][0]["toolSpec"]["name"] == "echo"
+        tool_results: Final = tuple(
+            content["toolResult"]
+            for message in body["messages"]
+            for content in message["content"]
+            if "toolResult" in content
+        )
+        if tool_results:
+            assert tool_results[0]["toolUseId"] == "toolu_gateway"
+            assert tool_results[0]["content"] == [{"text": "gateway-ok"}]
+        content_events: Final = (
+            (("contentBlockDelta", '{"contentBlockIndex":0,"delta":{"text":"gateway-ok"}}'),)
+            if tool_results
+            else (
+                (
+                    "contentBlockStart",
+                    '{"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"toolu_gateway","name":"echo"}}}',
+                ),
+                (
+                    "contentBlockDelta",
+                    json.dumps({"contentBlockIndex": 0, "delta": {"toolUse": {"input": '{"text":"gateway-ok"}'}}}),
+                ),
+            )
+        )
+        events: Final = (
+            ("messageStart", '{"role":"assistant"}'),
+            *content_events,
+            ("contentBlockStop", '{"contentBlockIndex":0}'),
+            ("messageStop", json.dumps({"stopReason": "end_turn" if tool_results else "tool_use"})),
+            (
+                "metadata",
+                '{"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14},"metrics":{"latencyMs":1}}',
+            ),
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/vnd.amazon.eventstream"},
+            content=b"".join(_converse_stream_event(event_type, payload) for event_type, payload in events),
+        )
+
+    client: Final = AsyncHTTPHandler()
+    await client.client.aclose()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
+        client.client = transport
+        common: Final = {
+            "model": (
+                "bedrock/arn:aws-us-gov:bedrock:us-gov-west-1:123456789012:"
+                "inference-profile/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0"
+            ),
+            "client": client,
+            "stream": True,
+            "max_output_tokens": 128,
+            "client_metadata": {"originator": "codex"},
+            "metadata": {"purpose": "synthetic-regression"},
+            "requestMetadata": {"request_id": "synthetic-request"},
+            "tools": [{"type": "function", "name": "echo", "parameters": {"type": "object"}}],
+            "aws_access_key_id": "synthetic-access-key",
+            "aws_secret_access_key": "synthetic-secret-key",
+            "aws_region_name": "us-gov-west-1",
+        }
+        first: Final = await litellm.aresponses(input="Call echo with gateway-ok.", **common)
+        first_events: Final = [event.model_dump(mode="json") async for event in first]
+        completed: Final = next(event["response"] for event in first_events if event["type"] == "response.completed")
+        tool_call: Final = next(item for item in completed["output"] if item["type"] == "function_call")
+        assert tool_call["call_id"] == "toolu_gateway"
+        assert tool_call["name"] == "echo"
+        assert json.loads(tool_call["arguments"]) == {"text": "gateway-ok"}
+        assert any(event["type"] == "response.function_call_arguments.delta" for event in first_events)
+        second: Final = await litellm.aresponses(
+            input=[
+                {"role": "user", "content": "Call echo with gateway-ok."},
+                *completed["output"],
+                {"type": "function_call_output", "call_id": tool_call["call_id"], "output": "gateway-ok"},
+            ],
+            **common,
+        )
+        second_events: Final = [event.model_dump(mode="json") async for event in second]
+        assert "".join(
+            event["delta"] for event in second_events if event["type"] == "response.output_text.delta"
+        ) == "gateway-ok"
+        assert any(event["type"] == "response.completed" for event in second_events)
 
 
 def test_transform_usage():

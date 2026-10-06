@@ -1330,7 +1330,9 @@ class AmazonConverseConfig(BaseConfig):
 
         # Filter out internal/MCP-related parameters that shouldn't be sent to the API
         # These are LiteLLM internal parameters, not API parameters
-        additional_request_params = filter_internal_params(additional_request_params)
+        additional_request_params = filter_internal_params(
+            additional_request_params, additional_internal_params=frozenset(("client_metadata",))
+        )
 
         # Filter out non-serializable objects (exceptions, callables, logging objects, etc.)
         # from additional_request_params to prevent JSON serialization errors
