@@ -91,6 +91,7 @@ e2e_py_pattern='^tests/e2e/.*\.py$'
 spec_pattern='^(litellm/(proxy|types)/.*|ui/litellm-dashboard/(scripts/gen-api-types\.mjs|package\.json|package-lock\.json|src/lib/http/schema\.d\.ts))$'
 ui_prettier_pattern='^ui/litellm-dashboard/.*\.(js|jsx|ts|tsx|mjs|cjs|json|css|scss|md|mdx|yml|yaml|html)$'
 ui_eslint_pattern='^ui/litellm-dashboard/.*\.(js|jsx|ts|tsx|mjs|cjs)$'
+ui_vendor_pattern='^ui/litellm-dashboard/vendor/braces-depth-guard/'
 
 # CI's lint job (test-linting.yml) only inspects litellm/, so a tests-only or
 # scripts-only commit can't turn it red; scope the trigger there to skip the slow
@@ -107,6 +108,7 @@ spec_files=$(scope_match "$spec_pattern")
 # split so this flags exactly what the job would.
 ui_prettier_changed=$(scope_match "$ui_prettier_pattern")
 ui_eslint_changed=$(scope_match "$ui_eslint_pattern")
+ui_vendor_changed=$(scope_match "$ui_vendor_pattern")
 ui_prettier_files=$(printf '%s\n' "$ui_prettier_changed" | existing_files)
 ui_eslint_files=$(printf '%s\n' "$ui_eslint_changed" | existing_files)
 
@@ -137,6 +139,7 @@ if [ -n "$staged" ]; then
     warn_skipped "Python lint (make lint)" "$litellm_py_pattern" "$litellm_py_files"
     warn_skipped "tests/e2e checks (basedpyright + raw HTTP client ban)" "$e2e_py_pattern" "$e2e_py_files"
     warn_skipped "dashboard lint (prettier + eslint + lint budgets)" "$ui_prettier_pattern" "$ui_prettier_changed"
+    warn_skipped "vendored braces security check" "$ui_vendor_pattern" "$ui_vendor_changed"
     warn_skipped "dashboard API-type sync (npm run gen:api)" "$spec_pattern" "$spec_files"
 fi
 
@@ -156,6 +159,7 @@ EOF
 $ui_eslint_files
 EOF
         cd ui/litellm-dashboard
+        npm run check:braces || rc=1
         if [ ${#prettier_rel[@]} -gt 0 ]; then
             npx prettier --check "${prettier_rel[@]}" || rc=1
         fi
@@ -234,7 +238,7 @@ dashboard_checks() {
     lint_dashboard || { echo "✗ Dashboard lint failed. See above; format with: (cd ui/litellm-dashboard && npm run format)." >&2; return 1; }
 }
 
-if [ -n "$ui_prettier_changed" ] || [ -n "$ui_eslint_changed" ]; then
+if [ -n "$ui_prettier_changed$ui_eslint_changed$ui_vendor_changed" ]; then
     dash_log=$(mktemp)
     set -m
     dashboard_checks > "$dash_log" 2>&1 &
@@ -312,10 +316,10 @@ summary_item() {
 echo "check: summary"
 summary_item "Python lint (make lint)" "$litellm_py_files" "no litellm/ Python files in scope"
 summary_item "tests/e2e checks (basedpyright + raw HTTP client ban)" "$e2e_py_files" "no tests/e2e Python files in scope"
-summary_item "dashboard lint (prettier + eslint + lint budgets)" "$ui_prettier_changed$ui_eslint_changed" "no dashboard files in scope"
+summary_item "dashboard lint and vendored dependency check" "$ui_prettier_changed$ui_eslint_changed$ui_vendor_changed" "no dashboard files in scope"
 summary_item "dashboard API-type sync (npm run gen:api)" "$spec_files" "no litellm/proxy, litellm/types, or generator files in scope"
 
-if [ -z "$litellm_py_files$e2e_py_files$ui_prettier_changed$ui_eslint_changed$spec_files" ]; then
+if [ -z "$litellm_py_files$e2e_py_files$ui_prettier_changed$ui_eslint_changed$ui_vendor_changed$spec_files" ]; then
     echo "check: NOTE - no gating lint check matches the files in scope, so nothing ran:" >&2
     printf '%s\n' "$scope" | sed 's/^/    /' >&2
     echo "  A pass here is a no-op, not a lint verdict." >&2
