@@ -204,15 +204,18 @@ async def read_agent_record(
 
 
 def agent_record_version(row: BaseModel) -> str:
-    """Opaque fence over the complete committed row and its loaded permission relation.
+    """Fence committed authoring state, permissions and creation identity.
 
-    The header discloses no hidden configuration. Unlike a behavior digest this includes
-    timestamps, so deletion/recreation or an intervening ordinary write invalidates a read.
+    Only top-level accounting spend and update time are excluded. Nested and unknown
+    fields remain fenced, and the new hash domain refuses earlier whole-row tokens.
     """
-    value: Final = row.model_dump(mode="json")
+    value: Final = row.model_dump(mode="json", exclude=MappingProxyType({"spend": True, "updated_at": True}))
     return (
         "sha256:"
-        + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        + hashlib.sha256(
+            b"litellm.agent-authoring.v2\x00"
+            + json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        ).hexdigest()
     )
 
 
@@ -228,8 +231,8 @@ async def patch_agent_transaction(
 ) -> tuple[AgentResponse, str]:
     """Compare and mutate under the authoritative database's row locks.
 
-    Ordinary stock writers also acquire these row locks when they update. A writer
-    committing first changes the compared version; one arriving later waits until
+    Ordinary stock writers also acquire these row locks when they update. An authored
+    change committing first changes the compared version; a later writer waits until
     this transaction completes. No process-local lock or unlocked read is a fence.
     """
     client: Final = proxy_server.prisma_client

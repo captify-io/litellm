@@ -19,6 +19,7 @@ from litellm.proxy.agent_endpoints import owned_authoring as gateway
 URL = os.environ.get("CAPTIFY_CAS_TEST_DATABASE_URL", "")
 SAFE_URLS = (
     "postgresql://cas_review:synthetic-cas-test-only@127.0.0.1:55438/cas_review",
+    "postgresql://cas_review:synthetic-cas-test-only@127.0.0.1:55446/cas_review",
     "postgresql://postgres:postgres@localhost:5432/litellm_test",
 )
 
