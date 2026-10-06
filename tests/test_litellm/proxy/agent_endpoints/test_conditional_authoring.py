@@ -15,8 +15,10 @@ from fastapi import HTTPException, Response
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from prisma import Prisma
 from pydantic import BaseModel, ConfigDict
+from redis.asyncio import Redis
 
 from litellm.proxy.agent_endpoints import owned_authoring as gateway
+from litellm.proxy.common_utils import config_sync_pubsub
 from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
 
 TEST_URL = os.environ.get("CAPTIFY_CAS_TEST_DATABASE_URL", "")
@@ -25,6 +27,16 @@ SAFE_URLS = (
     "postgresql://cas_review:synthetic-cas-test-only@127.0.0.1:55446/cas_review",
     "postgresql://postgres:postgres@localhost:5432/litellm_test",
 )
+
+
+class CommittedReadRedis(Redis):
+    def __init__(self, observer):
+        super().__init__()
+        self.observer = observer
+
+    async def publish(self, channel, message):
+        await self.observer()
+        return 0
 
 
 class ExtensibleAgentRecord(BaseModel):
@@ -214,6 +226,90 @@ class ConditionalAuthoringPostgresTests(IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as stale:
             await self.change(confirmed, "Cannot reuse an old acknowledgement")
         self.assertEqual(stale.exception.status_code, 409)
+
+    async def test_final_notification_can_read_the_committed_edit_from_an_independent_connection(self):
+        observed = []
+
+        async def observe():
+            row = await self.other.litellm_agentstable.find_unique(where={"agent_id": self.id})
+            observed.append(gateway._json_object(row.agent_card_params)["description"])
+
+        redis = CommittedReadRedis(observe)
+        self.addAsyncCleanup(redis.aclose)
+        cache = SimpleNamespace(namespace=None, init_async_client=lambda: redis)
+        self.enterContext(
+            patch.object(  # test-quality-ok: Redis transport boundary observes real independent database reads.
+                config_sync_pubsub, "coordination_redis_cache", return_value=cache
+            )
+        )
+        version = gateway.agent_record_version(await self.read())
+        await self.change(version, "Committed edit")
+        self.assertTrue(observed)
+        self.assertEqual(observed[-1], "Committed edit")
+        before_conflict = tuple(observed)
+        with self.assertRaises(HTTPException) as conflict:
+            await self.change(version, "Rejected stale edit")
+        self.assertEqual(conflict.exception.status_code, 409)
+        self.assertEqual(tuple(observed), before_conflict)
+        self.assertEqual(gateway._json_object((await self.read()).agent_card_params)["description"], "Committed edit")
+
+    async def test_redis_failure_preserves_a_successful_committed_edit(self):
+        observed = []
+
+        async def unavailable():
+            row = await self.other.litellm_agentstable.find_unique(where={"agent_id": self.id})
+            observed.append(gateway._json_object(row.agent_card_params)["description"])
+            raise ConnectionError("isolated Redis transport failure")
+
+        redis = CommittedReadRedis(unavailable)
+        self.addAsyncCleanup(redis.aclose)
+        cache = SimpleNamespace(namespace=None, init_async_client=lambda: redis)
+        self.enterContext(
+            patch.object(  # test-quality-ok: Fail the Redis transport while using real database writes.
+                config_sync_pubsub, "coordination_redis_cache", return_value=cache
+            )
+        )
+        response = await self.change(gateway.agent_record_version(await self.read()), "Committed during outage")
+        self.assertEqual(gateway._json_object(response.agent_card_params)["description"], "Committed during outage")
+        self.assertEqual(observed[-1], "Committed during outage")
+        self.assertEqual(
+            gateway._json_object((await self.read()).agent_card_params)["description"], "Committed during outage"
+        )
+
+    async def test_failed_commit_has_no_additional_success_notification(self):
+        observed = []
+
+        async def observe():
+            row = await self.other.litellm_agentstable.find_unique(where={"agent_id": self.id})
+            observed.append(gateway._json_object(row.agent_card_params)["description"])
+
+        redis = CommittedReadRedis(observe)
+        self.addAsyncCleanup(redis.aclose)
+        cache = SimpleNamespace(namespace=None, init_async_client=lambda: redis)
+        self.enterContext(
+            patch.object(  # test-quality-ok: Observe the real transaction through the Redis transport boundary.
+                config_sync_pubsub, "coordination_redis_cache", return_value=cache
+            )
+        )
+        trigger = "reject_commit_" + uuid4().hex
+        await self.db.execute_raw(
+            f"CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN RAISE EXCEPTION 'isolated deferred commit failure'; END $$"
+        )
+        try:
+            await self.db.execute_raw(
+                f'CREATE CONSTRAINT TRIGGER {trigger} AFTER UPDATE ON "LiteLLM_AgentsTable" '
+                f"DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.agent_id = '{self.id}') "
+                f"EXECUTE FUNCTION {trigger}()"
+            )
+            with self.assertRaises(HTTPException) as failed:
+                await self.change(gateway.agent_record_version(await self.read()), "Never committed")
+            self.assertEqual(failed.exception.status_code, 503)
+            self.assertEqual(observed, ["Before"])
+            self.assertEqual(gateway._json_object((await self.read()).agent_card_params)["description"], "Before")
+        finally:
+            await self.db.execute_raw(f'DROP TRIGGER IF EXISTS {trigger} ON "LiteLLM_AgentsTable"')
+            await self.db.execute_raw(f"DROP FUNCTION {trigger}()")
 
     async def test_stock_row_writer_blocks_guarded_read_then_version_refuses(self):
         version = gateway.agent_record_version(await self.read())

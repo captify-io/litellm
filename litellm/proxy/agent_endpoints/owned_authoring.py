@@ -28,6 +28,7 @@ from litellm.proxy.auth.auth_checks import (
     _delete_cache_key_object,  # pyright: ignore[reportPrivateUsage]  # Reuse the existing key-cache invalidation contract.
 )
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+from litellm.proxy.common_utils.config_sync_pubsub import publish_config_change_for_object_type
 from litellm.proxy.common_utils.rbac_utils import check_feature_access_for_user
 from litellm.repositories.prisma_protocols import TableActions
 from litellm.types.agents import AgentResponse
@@ -324,6 +325,7 @@ async def patch_agent_transaction(
         raise HTTPException(503, "The conditional agent update could not be confirmed") from error
     global_agent_registry.deregister_agent(agent_name=current.agent_name)
     global_agent_registry.register_agent(agent_config=result)
+    await publish_config_change_for_object_type("litellm_agentstable")
     return result, version
 
 
@@ -621,6 +623,7 @@ async def create_owned_agent_transaction(body: OwnedAgentCreate, http_request: R
                 )
     response: Final = AgentResponse.model_validate(result.model_dump())
     global_agent_registry.register_agent(agent_config=response)
+    await publish_config_change_for_object_type("litellm_agentstable")
     # Invalidate the serving worker and the shared cache, then notify peers.
     # Platform confirms access with a separate request under the caller key.
     await _delete_cache_key_object(

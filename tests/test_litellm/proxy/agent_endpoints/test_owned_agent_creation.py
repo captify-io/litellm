@@ -15,6 +15,8 @@ from prisma import Prisma
 from starlette.requests import Request
 
 from litellm.proxy.agent_endpoints import owned_authoring as gateway
+from litellm.proxy.common_utils import config_sync_pubsub
+from tests.test_litellm.proxy.agent_endpoints.test_conditional_authoring import CommittedReadRedis
 
 URL = os.environ.get("CAPTIFY_CAS_TEST_DATABASE_URL", "")
 SAFE_URLS = (
@@ -118,6 +120,54 @@ class OwnedAgentCreationTests(IsolatedAsyncioTestCase):
 
     async def create(self):
         return await gateway.create_owned_agent_transaction(self.body, self.request)
+
+    async def test_creation_notification_observes_committed_agent_and_owner_grant(self):
+        await self.db.litellm_objectpermissiontable.update(
+            where={"object_permission_id": self.key_permission.object_permission_id},
+            data={"agents": ["existing-fixture"]},
+        )
+        observed = []
+
+        async def observe():
+            row = await self.db.litellm_agentstable.find_unique(where={"agent_id": self.agent_id})
+            owner = await self.owner()
+            grant = await self.db.litellm_objectpermissiontable.find_unique(
+                where={"object_permission_id": owner.object_permission_id}
+            )
+            observed.append((row.agent_id if row else None, self.agent_id in grant.agents))
+
+        redis = CommittedReadRedis(observe)
+        self.addAsyncCleanup(redis.aclose)
+        cache = SimpleNamespace(namespace=None, init_async_client=lambda: redis)
+        self.enterContext(
+            patch.object(  # test-quality-ok: Redis transport boundary observes committed database state.
+                config_sync_pubsub, "coordination_redis_cache", return_value=cache
+            )
+        )
+        await self.create()
+        self.assertTrue(observed)
+        self.assertEqual(observed[-1], (self.agent_id, True))
+
+    async def test_redis_failure_does_not_turn_committed_creation_into_an_error(self):
+        observed = []
+
+        async def unavailable():
+            row = await self.db.litellm_agentstable.find_unique(where={"agent_id": self.agent_id})
+            observed.append(row.agent_id if row else None)
+            raise ConnectionError("isolated Redis transport failure")
+
+        redis = CommittedReadRedis(unavailable)
+        self.addAsyncCleanup(redis.aclose)
+        cache = SimpleNamespace(namespace=None, init_async_client=lambda: redis)
+        self.enterContext(
+            patch.object(  # test-quality-ok: Fail the Redis transport while using real database writes.
+                config_sync_pubsub, "coordination_redis_cache", return_value=cache
+            )
+        )
+        response = await self.create()
+        self.assertEqual(response.agent_id, self.agent_id)
+        self.assertEqual(observed, [self.agent_id])
+        self.assertIsNotNone(await self.db.litellm_agentstable.find_unique(where={"agent_id": self.agent_id}))
 
     async def assert_refused_without_write(self):
         before = (await self.owner()).model_dump()
