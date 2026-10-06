@@ -1,6 +1,8 @@
 """Tests for the identity-only gateway session token (mint/open, hostile-input totality)."""
 
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timedelta, timezone
+from typing import Final
 
 import jwt
 import pytest
@@ -64,6 +66,14 @@ def _mint_refresh() -> str:
     minted = mint_session_refresh_token(PRINCIPAL, KEYS, NOW)
     assert isinstance(minted, MintedSessionToken)
     return minted.token.get_secret_value()
+
+
+def _tamper_signature(token: str) -> str:
+    signed, signature = token.rsplit(".", 1)
+    decoded: Final = urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+    changed: Final = bytes([decoded[0] ^ 1]) + decoded[1:]
+    encoded: Final = urlsafe_b64encode(changed).rstrip(b"=").decode("ascii")
+    return f"{signed}.{encoded}"
 
 
 def _sign_claims(payload: dict, prefix: str = SESSION_TOKEN_PREFIX, keys: SessionKeys = KEYS) -> str:
@@ -138,7 +148,7 @@ def test_still_valid_one_second_before_expiry():
 
 def test_tampered_signature_is_bad_signature():
     token = _mint_access()
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    tampered = _tamper_signature(token)
     assert isinstance(open_session_token(tampered, KEYS, NOW), SessionBadSignature)
 
 
@@ -288,6 +298,27 @@ RSA_KEYS = AsymmetricSessionKeys(private_key_pem=SecretStr(_RSA_PEM_A), kid="202
 OTHER_RSA_KEYS = AsymmetricSessionKeys(private_key_pem=SecretStr(_RSA_PEM_B), kid="2025-06")
 
 
+@pytest.mark.parametrize("keys", [KEYS, RSA_KEYS], ids=["hs256", "rs256"])
+@pytest.mark.parametrize("refresh", [False, True], ids=["access", "refresh"])
+def test_noncanonical_signature_encoding_is_malformed(keys: SessionKeys | AsymmetricSessionKeys, refresh: bool) -> None:
+    minted: Final = (
+        mint_session_refresh_token(PRINCIPAL, keys, NOW) if refresh else mint_session_token(PRINCIPAL, keys, NOW)
+    )
+    assert isinstance(minted, MintedSessionToken)
+    token: Final = minted.token.get_secret_value()
+    signed, signature = token.rsplit(".", 1)
+    alphabet: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    noncanonical: Final = signature[:-1] + alphabet[alphabet.index(signature[-1]) | 1]
+    padding: Final = "=" * (-len(signature) % 4)
+    assert noncanonical != signature
+    assert urlsafe_b64decode(noncanonical + padding) == urlsafe_b64decode(signature + padding)
+    malformed: Final = f"{signed}.{noncanonical}"
+    opened: Final = (
+        open_session_refresh_token(malformed, keys, NOW) if refresh else open_session_token(malformed, keys, NOW)
+    )
+    assert isinstance(opened, SessionMalformed)
+
+
 def test_rs256_access_round_trip_with_kid_and_alg_pinned_in_header():
     minted = mint_session_token(PRINCIPAL, RSA_KEYS, NOW)
     assert isinstance(minted, MintedSessionToken)
@@ -329,7 +360,7 @@ def test_rs256_tampered_signature_is_bad_signature():
     minted = mint_session_token(PRINCIPAL, RSA_KEYS, NOW)
     assert isinstance(minted, MintedSessionToken)
     token = minted.token.get_secret_value()
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    tampered = _tamper_signature(token)
     assert isinstance(open_session_token(tampered, RSA_KEYS, NOW), SessionBadSignature)
 
 
@@ -413,7 +444,7 @@ def test_rotation_window_still_enforces_expiry_and_tamper_on_the_previous_key():
     )
     after = NOW + timedelta(seconds=SESSION_TTL_SECONDS + 1)
     assert isinstance(open_session_token(token, rotated, after), SessionExpired)
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    tampered = _tamper_signature(token)
     assert isinstance(open_session_token(tampered, rotated, NOW), SessionBadSignature)
 
 
