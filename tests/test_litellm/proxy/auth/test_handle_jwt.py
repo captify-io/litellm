@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -31,6 +32,296 @@ from litellm.proxy.auth.handle_jwt import (
     JWTHandler,
     NoMatchingJWTPublicKeyError,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verification", [None, False, "false", "true", 0, 1, True])
+@pytest.mark.parametrize("issuer_mapping", [False, True])
+@pytest.mark.parametrize("identity_field", ["sub", "absent", None, "email", "profile.mail"])
+async def test_jwt_email_identity_requires_verified_claim(monkeypatch, verification, issuer_mapping, identity_field):
+    issuer = "https://identity.example.test"
+    audience = "gateway-test"
+    jwks_url = f"{issuer}/keys"
+    private_key, jwk = _get_rsa_key_and_jwk(kid="verified-email-test")
+    email_field = "profile.mail" if identity_field == "profile.mail" else "email"
+    config = {
+        "user_id_jwt_field": identity_field,
+        "user_email_jwt_field": email_field,
+    }
+    monkeypatch.setenv("JWT_PUBLIC_KEY_URL", jwks_url)
+    monkeypatch.setenv("JWT_AUDIENCE", audience)
+    monkeypatch.setenv("JWT_ISSUER", issuer)
+    handler = _get_jwt_handler_with_issuer_keys(
+        issuers=([{"issuer": issuer, "audience": audience, "jwks_url": jwks_url, **config}] if issuer_mapping else []),
+        keys_by_url={jwks_url: [jwk]},
+    )
+    if not issuer_mapping:
+        handler.litellm_jwtauth = LiteLLM_JWTAuth(**config)
+    token = _encode_rsa_jwt(
+        private_key,
+        issuer,
+        audience,
+        "verified-email-test",
+        extra_claims={
+            "sub": "stable-subject",
+            "email": "victim@example.test",
+            "profile": {"mail": "victim@example.test"},
+            **({"email_verified": verification} if verification is not None else {}),
+        },
+    )
+    claims = await handler.auth_jwt(token)
+    handler.litellm_jwtauth = LiteLLM_JWTAuth.model_validate({
+        **handler.litellm_jwtauth.model_dump(),
+        "object_id_jwt_field": identity_field,
+        "role_mappings": [{"role": "member", "internal_role": LitellmUserRoles.INTERNAL_USER}],
+    })
+    assert handler.get_object_id(claims, None) == (
+        "stable-subject" if identity_field == "sub"
+        else "victim@example.test" if verification is True and identity_field in {"email", "profile.mail"}
+        else None
+    )
+    user_id, user_email, _ = await JWTAuthManager.get_user_info(handler, claims)
+    assert user_email == ("victim@example.test" if verification is True else None)
+    assert user_id == (
+        "stable-subject" if identity_field == "sub" else "victim@example.test" if verification is True else None
+    )
+    assert handler.get_user_email(claims, None) == user_email
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["sub", "email", "contact_email", JWTHandler.LITELLM_USER_EMAIL_CLAIM, JWTHandler.LITELLM_USER_ID_CLAIM])
+@pytest.mark.parametrize("verification", [False, "true", 1, True])
+async def test_signed_jwt_email_key_mapping_refuses_before_cache(field, verification):
+    from litellm.proxy.auth.user_api_key_auth import _resolve_jwt_to_virtual_key
+
+    issuer = "https://identity.example.test"
+    private_key, jwk = _get_rsa_key_and_jwk(kid="key-mapping-test")
+    handler = _get_jwt_handler_with_issuer_keys(
+        issuers=[{
+            "issuer": issuer, "audience": "gateway-test", "jwks_url": f"{issuer}/keys",
+            "user_email_jwt_field": "contact_email", "user_id_jwt_field": "email",
+        }],
+        keys_by_url={f"{issuer}/keys": [jwk]},
+    )
+    handler.litellm_jwtauth.virtual_key_claim_field = field
+    token = _encode_rsa_jwt(private_key, issuer, "gateway-test", "key-mapping-test", extra_claims={
+        "sub": "opaque-client", "email": "victim@example.test",
+        "contact_email": "victim@example.test", "email_verified": verification,
+    })
+    claims = await handler.auth_jwt(token)
+    cache = MagicMock()
+    cache.async_get_cache = AsyncMock(return_value="__NO_MAPPING__")
+    if field in {JWTHandler.LITELLM_USER_EMAIL_CLAIM, JWTHandler.LITELLM_USER_ID_CLAIM} and verification is not True:
+        assert field not in claims
+        assert await _resolve_jwt_to_virtual_key(claims, handler, None, cache, None, MagicMock()) is None
+        cache.async_get_cache.assert_not_awaited()
+        handler.litellm_jwtauth.user_id_jwt_field = field
+        handler.litellm_jwtauth = LiteLLM_JWTAuth.model_validate({
+            **handler.litellm_jwtauth.model_dump(),
+            "object_id_jwt_field": field,
+            "role_mappings": [{"role": "member", "internal_role": LitellmUserRoles.INTERNAL_USER}],
+        })
+        assert handler.get_user_id(claims, None) is None
+        assert handler.get_object_id(claims, None) is None
+    elif field != "sub" and verification is not True:
+        with pytest.raises(HTTPException, match="Verified canonical email required"):
+            await _resolve_jwt_to_virtual_key(claims, handler, None, cache, None, MagicMock())
+        cache.async_get_cache.assert_not_awaited()
+    else:
+        assert await _resolve_jwt_to_virtual_key(claims, handler, None, cache, None, MagicMock()) is None
+        value = "opaque-client" if field == "sub" else "victim@example.test"
+        cache.async_get_cache.assert_awaited_once_with(f"jwt_key_mapping:{field}:{value}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issuer_mapping", [False, True])
+@pytest.mark.parametrize("canonical", [None, "different@example.test", "victim@example.test"])
+@pytest.mark.parametrize("identity_field", ["sub", "contact_email", "metadata.contact_email"])
+async def test_jwt_mapped_email_verification_binds_exact_canonical_value(issuer_mapping, canonical, identity_field):
+    from litellm.proxy._types import JWTIssuerConfig
+
+    issuer = JWTIssuerConfig(
+        issuer="https://identity.example.test",
+        audience="gateway-test",
+        user_id_jwt_field=identity_field,
+        user_email_jwt_field="contact_email",
+    )
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(
+        issuers=[issuer] if issuer_mapping else None,
+        user_id_jwt_field=identity_field,
+        user_email_jwt_field="contact_email",
+    )
+    token = {
+        "sub": "stable-subject",
+        "contact_email": "victim@example.test",
+        "email_verified": True,
+        **({"email": canonical} if canonical is not None else {}),
+    }
+    claims = handler._apply_issuer_claim_mappings(token, issuer) if issuer_mapping else token
+    user_id, email, _ = await JWTAuthManager.get_user_info(handler, claims)
+    assert email == (canonical if canonical == "victim@example.test" else None)
+    assert user_id == ("stable-subject" if identity_field == "sub" else email)
+
+
+@pytest.mark.parametrize("field", ["email", "metadata.email"])
+@pytest.mark.parametrize("verified", [False, True])
+def test_jwt_explicit_email_identity_without_email_mapping(field, verified):
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(user_id_jwt_field=field)
+    token = {"email": "user@example.test", "email_verified": verified}
+    assert handler.get_user_id(token, None) == (token["email"] if verified else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["user.email", "metadata.user.email"])
+@pytest.mark.parametrize("issuer_mapping", [False, True])
+@pytest.mark.parametrize("verified,canonical", [(True, "attacker@example.test"), (True, None), (False, "victim@example.test"), (True, "victim@example.test")])
+async def test_signed_nested_email_identity_without_email_mapping(field, issuer_mapping, verified, canonical, monkeypatch):
+    from litellm.proxy.auth.user_api_key_auth import _resolve_jwt_to_virtual_key
+
+    issuer = "https://identity.example.test"
+    private_key, jwk = _get_rsa_key_and_jwk(kid="nested-email-test")
+    monkeypatch.setenv("JWT_PUBLIC_KEY_URL", f"{issuer}/keys")
+    monkeypatch.setenv("JWT_AUDIENCE", "gateway-test")
+    monkeypatch.setenv("JWT_ISSUER", issuer)
+    handler = _get_jwt_handler_with_issuer_keys(
+        issuers=[{
+            "issuer": issuer, "audience": "gateway-test", "jwks_url": f"{issuer}/keys", "user_id_jwt_field": field,
+        }] if issuer_mapping else [],
+        keys_by_url={f"{issuer}/keys": [jwk]},
+    )
+    if not issuer_mapping:
+        handler.litellm_jwtauth.user_id_jwt_field = field
+    handler.litellm_jwtauth = LiteLLM_JWTAuth.model_validate({
+        **handler.litellm_jwtauth.model_dump(),
+        "object_id_jwt_field": field,
+        "role_mappings": [{"role": "member", "internal_role": LitellmUserRoles.INTERNAL_USER}],
+    })
+    handler.litellm_jwtauth.virtual_key_claim_field = field
+    token = _encode_rsa_jwt(private_key, issuer, "gateway-test", "nested-email-test", extra_claims={
+        "user": {"email": "victim@example.test"}, "email_verified": verified,
+        **({"email": canonical} if canonical is not None else {}),
+    })
+    claims = await handler.auth_jwt(token)
+    trusted = verified and canonical == "victim@example.test"
+    assert handler.get_user_id(claims, None) == (canonical if trusted else None)
+    assert handler.get_object_id(claims, None) == (canonical if trusted else None)
+    cache = MagicMock()
+    cache.async_get_cache = AsyncMock(return_value="__NO_MAPPING__")
+    if trusted:
+        assert await _resolve_jwt_to_virtual_key(claims, handler, None, cache, None, MagicMock()) is None
+        cache.async_get_cache.assert_awaited_once_with(f"jwt_key_mapping:{field}:{canonical}")
+    else:
+        with pytest.raises(HTTPException, match="Verified canonical email required"):
+            await _resolve_jwt_to_virtual_key(claims, handler, None, cache, None, MagicMock())
+        cache.async_get_cache.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [False, True])
+@pytest.mark.parametrize("lookup", ["fuzzy", "email-id", "missing-id", "stable-id", "stable-sso", "cached-id"])
+async def test_jwt_email_account_resolution_cannot_rebind_unverified_identity(verified, lookup):
+    subject = f"stable-subject-{lookup}-{verified}"
+    victim = LiteLLM_UserTable(
+        user_id="victim@example.test",
+        user_email="victim@example.test",
+        sso_user_id=None if verified else "existing-subject",
+        user_role=LitellmUserRoles.PROXY_ADMIN,
+        organization_memberships=[],
+    )
+    own = LiteLLM_UserTable(
+        user_id=subject,
+        user_email=None,
+        sso_user_id=subject,
+        user_role=LitellmUserRoles.INTERNAL_USER,
+        organization_memberships=[],
+    )
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(
+        user_id_jwt_field=("email" if lookup == "email-id" else "absent" if lookup == "missing-id" else "sub"),
+        user_email_jwt_field="email",
+    )
+    claims = {"sub": subject, "email": victim.user_email, "email_verified": verified}
+    user_id, user_email, valid_email = await JWTAuthManager.get_user_info(handler, claims)
+    prisma = MagicMock()
+    table = prisma.db.litellm_usertable
+
+    async def find_unique(*, where, include=None):
+        if where == {"user_id": victim.user_id}:
+            return victim
+        if lookup == "stable-id" and where == {"user_id": own.user_id}:
+            return own
+        if lookup == "stable-sso" and where == {"sso_user_id": own.sso_user_id}:
+            return own
+        return None
+
+    table.find_unique = AsyncMock(side_effect=find_unique)
+    table.find_first = AsyncMock(return_value=victim)
+    table.update = AsyncMock(return_value=victim)
+    table.update_many = AsyncMock(return_value=0)
+    table.create = AsyncMock()
+    cache = MagicMock()
+    cache.async_get_cache = AsyncMock(
+        side_effect=lambda **kw: victim if kw["key"] == victim.user_id else own if lookup == "cached-id" else None
+    )
+    cache.async_set_cache = AsyncMock()
+    with pytest.raises(ValueError, match="User doesn't exist in db") if lookup == "fuzzy" and not verified else nullcontext():
+        result = await JWTAuthManager.get_objects(
+            user_id=user_id,
+            user_email=user_email,
+            valid_user_email=valid_email,
+            org_id=None,
+            end_user_id=None,
+            team_id=None,
+            jwt_handler=handler,
+            prisma_client=prisma,
+            user_api_key_cache=cache,
+            parent_otel_span=None,
+            proxy_logging_obj=MagicMock(),
+            route="/chat/completions",
+        )
+        if not verified:
+            assert result[0] == (own if lookup.startswith("stable-") or lookup == "cached-id" else None)
+        elif lookup in {"fuzzy", "email-id", "missing-id"}:
+            assert result[0] == victim
+    await asyncio.sleep(0)
+    if not verified:
+        table.find_first.assert_not_awaited()
+        table.update.assert_not_awaited()
+        table.update_many.assert_not_awaited()
+        table.create.assert_not_awaited()
+        assert all(call.kwargs["key"] != victim.user_id for call in cache.async_get_cache.call_args_list)
+    elif lookup == "fuzzy":
+        table.update.assert_awaited_once_with(where={"user_id": victim.user_id}, data={"sso_user_id": subject})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [False, True])
+async def test_jwt_new_stable_user_stores_only_verified_email(verified):
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(
+        user_id_jwt_field="sub", user_email_jwt_field="email", user_id_upsert=True
+    )
+    claims = {"sub": f"new-subject-{verified}", "email": "new@example.test", "email_verified": verified}
+    user_id, email, valid_email = await JWTAuthManager.get_user_info(handler, claims)
+    prisma = MagicMock()
+    table = prisma.db.litellm_usertable
+    table.find_unique = AsyncMock(return_value=None)
+    table.find_first = AsyncMock(return_value=None)
+    table.create = AsyncMock(side_effect=lambda *, data, include: LiteLLM_UserTable(**data, organization_memberships=[]))
+    cache = MagicMock()
+    cache.async_get_cache = AsyncMock(return_value=None)
+    cache.async_set_cache = AsyncMock()
+    result = await JWTAuthManager.get_objects(
+        user_id=user_id, user_email=email, valid_user_email=valid_email,
+        org_id=None, end_user_id=None, team_id=None, jwt_handler=handler,
+        prisma_client=prisma, user_api_key_cache=cache, parent_otel_span=None,
+        proxy_logging_obj=MagicMock(), route="/chat/completions",
+    )
+    assert result[0].user_id == claims["sub"]
+    assert result[0].user_email == (claims["email"] if verified else None)
+    assert table.create.await_args.kwargs["data"].get("user_email") == result[0].user_email
 
 
 @pytest.mark.asyncio
@@ -973,6 +1264,8 @@ async def test_nested_jwt_field_access():
 
     # Test token with nested claims
     nested_token = {
+        "email": "user@example.com",
+        "email_verified": True,
         "user": {"sub": "u123", "email": "user@example.com"},
         "resource_access": {"my-client": {"roles": ["admin", "user"]}},
         "groups": ["team1", "team2"],
@@ -984,6 +1277,7 @@ async def test_nested_jwt_field_access():
 
     # Test flat token for backward compatibility
     flat_token = {
+        "email_verified": True,
         "sub": "u123",
         "email": "user@example.com",
         "roles": ["admin", "user"],
@@ -1111,11 +1405,11 @@ async def test_nested_jwt_field_missing_paths():
     jwt_handler.litellm_jwtauth = LiteLLM_JWTAuth(user_id_jwt_field="user.sub")
     assert jwt_handler.get_user_id(incomplete_token, "default_user") == "default_user"
 
-    # Test 2: Missing user.email should return default
+    # Test 2: An unverified email default cannot identify a user
     jwt_handler.litellm_jwtauth = LiteLLM_JWTAuth(user_email_jwt_field="user.email")
     assert (
         jwt_handler.get_user_email(incomplete_token, "default@example.com")
-        == "default@example.com"
+        is None
     )
 
     # Test 3: Missing groups should return empty list
@@ -1185,6 +1479,8 @@ async def test_metadata_prefix_handling_in_nested_fields():
 
     # Test token with proper structure for metadata prefix removal
     token = {
+        "email": "user@example.com",
+        "email_verified": True,
         "user": {
             "email": "user@example.com"  # This will be accessed when metadata.user.email is used
         },
@@ -5004,6 +5300,7 @@ async def test_global_jwt_ignores_user_supplied_internal_claims(monkeypatch):
         kid="global-key",
         extra_claims={
             "email": "real-user@example.com",
+            "email_verified": True,
             "team": {"id": "real-team"},
             "teams": ["real-team", "secondary-team"],
             "org": {"id": "real-org"},
@@ -5063,6 +5360,7 @@ async def test_multi_issuer_jwt_strips_unmapped_internal_claims(monkeypatch):
         kid="issuer-key",
         extra_claims={
             "email": "real-user@example.com",
+            "email_verified": True,
             JWTHandler.LITELLM_USER_ID_CLAIM: "victim-user",
             JWTHandler.LITELLM_TEAM_ID_CLAIM: "victim-team",
         },

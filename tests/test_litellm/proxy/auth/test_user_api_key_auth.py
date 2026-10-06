@@ -2307,7 +2307,8 @@ class TestJWTOAuth2Coexistence:
         assert result.user_email == "validated@example.com"
 
     @pytest.mark.asyncio
-    async def test_mapped_virtual_key_backfills_and_sets_user_email(self):
+    @pytest.mark.parametrize("verification", [None, False, "false", "true", 1, True])
+    async def test_mapped_virtual_key_backfills_and_sets_user_email(self, verification):
         """
         Regression (LIT-4710): when a JWT resolves straight to an existing
         virtual-key mapping (skipping auth_builder), the token's user_email must
@@ -2319,14 +2320,18 @@ class TestJWTOAuth2Coexistence:
         general_settings = {"enable_jwt_auth": True}
         user_api_key_cache = DualCache()
         prisma_client = MagicMock()
-        jwt_handler = MagicMock()
-        jwt_handler.is_jwt.return_value = True
-        jwt_handler.auth_jwt = AsyncMock(return_value={"sub": "mapped-user"})
-        jwt_handler.get_user_email = MagicMock(return_value="mapped@example.com")
-        jwt_handler.get_user_id = MagicMock(return_value="mapped-user")
+        jwt_handler = JWTHandler()
+        jwt_handler.auth_jwt = AsyncMock(
+            return_value={
+                "sub": "mapped-user",
+                "email": "mapped@example.com",
+                **({"email_verified": verification} if verification is not None else {}),
+            }
+        )
         jwt_handler.litellm_jwtauth = LiteLLM_JWTAuth(
             virtual_key_claim_field="sub",
-            user_email_jwt_field="sub",
+            user_id_jwt_field="sub",
+            user_email_jwt_field="email",
             virtual_key_mapping_cache_ttl=300,
         )
 
@@ -2338,9 +2343,14 @@ class TestJWTOAuth2Coexistence:
         )
         backfilled_user = LiteLLM_UserTable(
             user_id="mapped-user",
-            user_email="mapped@example.com",
+            user_email=None,
             user_role="internal_user",
         )
+
+        async def load_user(**kwargs):
+            if kwargs.get("user_email") is not None:
+                backfilled_user.user_email = kwargs["user_email"]
+            return backfilled_user
 
         mock_request = MagicMock()
         mock_request.url.path = "/v1/chat/completions"
@@ -2365,12 +2375,12 @@ class TestJWTOAuth2Coexistence:
             patch(
                 "litellm.proxy.auth.user_api_key_auth.get_user_object",
                 new_callable=AsyncMock,
-                return_value=backfilled_user,
+                side_effect=load_user,
             ) as mock_get_user_object,
         ):
             result = await _user_api_key_auth_builder(
                 request=mock_request,
-                api_key=jwt_token,
+                api_key=f"Bearer {jwt_token}",
                 azure_api_key_header="",
                 anthropic_api_key_header=None,
                 google_ai_studio_api_key_header=None,
@@ -2379,11 +2389,11 @@ class TestJWTOAuth2Coexistence:
             )
 
         assert result.user_id == "mapped-user"
-        assert result.user_email == "mapped@example.com"
-        assert (
-            mock_get_user_object.call_args_list[0].kwargs["user_email"]
-            == "mapped@example.com"
-        )
+        assert result.user_email == ("mapped@example.com" if verification is True else None)
+        if verification is True:
+            assert mock_get_user_object.call_args_list[0].kwargs["user_email"] == "mapped@example.com"
+        else:
+            assert all(call.kwargs.get("user_email") is None for call in mock_get_user_object.call_args_list)
 
     @pytest.mark.asyncio
     async def test_mapped_virtual_key_does_not_backfill_mismatched_owner(self):

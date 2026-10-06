@@ -14,7 +14,7 @@ import hashlib
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final, Literal, NoReturn, TypeVar, cast
 
 import httpx
@@ -227,7 +227,7 @@ class JWTHandler:
 
         return None
 
-    def get_rbac_role(self, token: dict) -> RBAC_ROLES | None:
+    def get_rbac_role(self, token: dict[str, object]) -> RBAC_ROLES | None:
         """
         Returns the RBAC role the token 'belongs' to.
 
@@ -462,9 +462,19 @@ class JWTHandler:
             return False
         return self.litellm_jwtauth.user_id_upsert
 
-    def get_user_id(self, token: dict, default_value: str | None) -> str | None:
+    def get_user_id(self, token: dict[str, object], default_value: str | None) -> str | None:
         if self._has_trusted_issuer_normalized_claim(token=token, claim=self.LITELLM_USER_ID_CLAIM):
-            return token.get(self.LITELLM_USER_ID_CLAIM)
+            issuer_config: Final = next(
+                issuer
+                for issuer in self.litellm_jwtauth.issuers or ()
+                if issuer.issuer == token[self.LITELLM_JWT_ISSUER_CLAIM]
+            )
+            if self.is_email_identity_field(token, issuer_config.user_id_jwt_field) and not self.is_verified_email(
+                token, token.get(self.LITELLM_USER_ID_CLAIM)
+            ):
+                return None
+            normalized_id: Final = token.get(self.LITELLM_USER_ID_CLAIM)
+            return normalized_id if isinstance(normalized_id, str) else None
 
         try:
             if self.litellm_jwtauth.user_id_jwt_field is not None:
@@ -477,7 +487,39 @@ class JWTHandler:
                 user_id = default_value
         except KeyError:
             user_id = default_value
+        if self.is_email_identity_field(token, self.litellm_jwtauth.user_id_jwt_field) and not self.is_verified_email(
+            token, user_id
+        ):
+            return None
         return user_id
+
+    def is_email_identity_field(self, token: Mapping[str, object], identity_field: str | None) -> bool:
+        email_fields: Final = (
+            "email",
+            self.LITELLM_USER_EMAIL_CLAIM,
+            self.litellm_jwtauth.user_email_jwt_field,
+            *(
+                issuer.user_email_jwt_field
+                for issuer in self.litellm_jwtauth.issuers or ()
+                if issuer.issuer == token.get(self.LITELLM_JWT_ISSUER_CLAIM)
+            ),
+        )
+        return identity_field is not None and (
+            identity_field.rsplit(".", 1)[-1] == "email"
+            or any(
+                field is not None and identity_field.removeprefix("metadata.") == field.removeprefix("metadata.")
+                for field in email_fields
+            )
+        )
+
+    @staticmethod
+    def is_verified_email(token: Mapping[str, object], email: object) -> bool:
+        return (
+            token.get("email_verified") is True
+            and isinstance(email, str)
+            and bool(email)
+            and email == token.get("email")
+        )
 
     def get_user_roles(self, token: dict, default_value: list[str] | None) -> list[str] | None:
         """
@@ -548,9 +590,14 @@ class JWTHandler:
             return True
         return False
 
-    def get_user_email(self, token: dict, default_value: str | None) -> str | None:
+    def get_user_email(self, token: dict[str, object], default_value: str | None) -> str | None:
         if self._has_trusted_issuer_normalized_claim(token=token, claim=self.LITELLM_USER_EMAIL_CLAIM):
-            return token.get(self.LITELLM_USER_EMAIL_CLAIM)
+            normalized_email: Final = token.get(self.LITELLM_USER_EMAIL_CLAIM)
+            return (
+                normalized_email
+                if isinstance(normalized_email, str) and self.is_verified_email(token, normalized_email)
+                else None
+            )
 
         try:
             if self.litellm_jwtauth.user_email_jwt_field is not None:
@@ -563,9 +610,9 @@ class JWTHandler:
                 user_email = None
         except KeyError:
             user_email = default_value
-        return user_email
+        return user_email if self.is_verified_email(token, user_email) else None
 
-    def get_object_id(self, token: dict, default_value: str | None) -> str | None:
+    def get_object_id(self, token: dict[str, object], default_value: str | None) -> str | None:
         try:
             if self.litellm_jwtauth.object_id_jwt_field is not None:
                 object_id = get_nested_value(
@@ -577,6 +624,10 @@ class JWTHandler:
                 object_id = default_value
         except KeyError:
             object_id = default_value
+        if self.is_email_identity_field(token, self.litellm_jwtauth.object_id_jwt_field) and not self.is_verified_email(
+            token, object_id
+        ):
+            return None
         return object_id
 
     def get_org_id(self, token: dict, default_value: str | None) -> str | None:
@@ -1025,7 +1076,7 @@ class JWTHandler:
         # its jwks_uri, matching JWTIssuerConfig.jwks_url's documented fallback.
         return f"{issuer_config.issuer.rstrip('/')}/.well-known/openid-configuration"
 
-    def _get_claim_value_for_issuer_mapping(self, token: dict, claim_field: str) -> Any:
+    def _get_claim_value_for_issuer_mapping(self, token: dict[str, object], claim_field: str) -> object:
         """Resolve a mapped claim from ``token``.
 
         Returns ``None`` when the field is absent or empty so that mapped claims
@@ -1042,8 +1093,10 @@ class JWTHandler:
             return None
         return claim_value
 
-    def _apply_issuer_claim_mappings(self, token: dict, issuer_config: JWTIssuerConfig) -> dict:
-        normalized: Final[dict] = {k: v for k, v in token.items() if k not in self.LITELLM_INTERNAL_CLAIMS}
+    def _apply_issuer_claim_mappings(
+        self, token: dict[str, object], issuer_config: JWTIssuerConfig
+    ) -> dict[str, object]:
+        normalized: Final[dict[str, object]] = {k: v for k, v in token.items() if k not in self.LITELLM_INTERNAL_CLAIMS}
         normalized[self.LITELLM_JWT_ISSUER_CLAIM] = issuer_config.issuer
         claim_mappings: Final = [
             (issuer_config.user_id_jwt_field, self.LITELLM_USER_ID_CLAIM),
@@ -1061,6 +1114,11 @@ class JWTHandler:
                 token=token,
                 claim_field=source_claim,
             )
+            if (
+                normalized_claim == self.LITELLM_USER_EMAIL_CLAIM
+                or self.is_email_identity_field(normalized, source_claim)
+            ) and not self.is_verified_email(normalized, claim_value):
+                continue
             if claim_value is not None:
                 normalized[normalized_claim] = claim_value
 
@@ -1592,7 +1650,7 @@ class JWTAuthManager:
     @staticmethod
     async def get_user_info(
         jwt_handler: JWTHandler,
-        jwt_valid_token: dict,
+        jwt_valid_token: dict[str, object],
     ) -> tuple[str | None, str | None, bool | None]:
         """Get user email and validation status"""
         user_email: Final = jwt_handler.get_user_email(token=jwt_valid_token, default_value=None)
@@ -2198,7 +2256,7 @@ class JWTAuthManager:
         if jwt_handler.litellm_jwtauth.oidc_userinfo_enabled and not jwt_handler.is_jwt(token=api_key):
             verbose_proxy_logger.debug("OIDC UserInfo is enabled. Fetching user info from UserInfo endpoint.")
             # Use the access token to fetch user info from OIDC UserInfo endpoint
-            jwt_valid_token: dict = await jwt_handler.get_oidc_userinfo(token=api_key)
+            jwt_valid_token: dict[str, object] = await jwt_handler.get_oidc_userinfo(token=api_key)
         else:
             # Default behavior: decode and validate the JWT token
             jwt_valid_token = await jwt_handler.auth_jwt(token=api_key)
