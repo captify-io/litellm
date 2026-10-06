@@ -3,7 +3,7 @@
     "limit": 17270
   },
   "reportArgumentType": {
-    "limit": 2531
+    "limit": 2524
   },
   "reportAssignmentType": {
     "limit": 319
@@ -12,7 +12,7 @@
     "limit": 480
   },
   "reportCallIssue": {
-    "limit": 106
+    "limit": 100
   },
   "reportConstantRedefinition": {
     "limit": 40
@@ -105,19 +105,19 @@
     "limit": 109
   },
   "reportUnknownMemberType": {
-    "limit": 38721
+    "limit": 38704
   },
   "reportUnknownParameterType": {
-    "limit": 19778
+    "limit": 19776
   },
   "reportUnknownVariableType": {
-    "limit": 30285
+    "limit": 30273
   },
   "reportUnnecessaryCast": {
     "limit": 117
   },
   "reportUnnecessaryComparison": {
-    "limit": 697
+    "limit": 696
   },
   "reportUnnecessaryContains": {
     "limit": 5

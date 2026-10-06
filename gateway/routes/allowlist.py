@@ -115,6 +115,10 @@ GATEWAY_EXACT_PATHS: frozenset[str] = frozenset(
     {
         "/",
         "/routes",
+        "/captify/v1/agents",
+        "/captify/v1/agents/{agent_id}",
+        "/captify/v1/agent-authoring-capabilities",
+        "/v1/agents/{agent_id}",
         "/openapi.json",
         "/docs",
         "/docs/oauth2-redirect",

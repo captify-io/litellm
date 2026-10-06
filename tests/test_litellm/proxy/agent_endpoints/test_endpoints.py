@@ -347,7 +347,7 @@ class TestAgentByIdKeyRedaction:
         test_client = _make_app_with_role(role)
         with patch("litellm.proxy.proxy_server.prisma_client") as mock_prisma:
             mock_prisma.db.litellm_agentstable.find_unique = AsyncMock(
-                return_value=None
+                return_value=_sample_agent_response()
             )
             mock_prisma.db.litellm_verificationtoken.find_many = AsyncMock(
                 return_value=[key_row]
@@ -409,7 +409,7 @@ class TestAgentRBACInternalUser:
         )
         with patch("litellm.proxy.proxy_server.prisma_client") as mock_prisma:
             mock_prisma.db.litellm_agentstable.find_unique = AsyncMock(
-                return_value=None
+                return_value=_sample_agent_response()
             )
             mock_prisma.db.litellm_verificationtoken.find_many = AsyncMock(
                 return_value=[]
