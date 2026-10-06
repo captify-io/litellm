@@ -98,6 +98,9 @@ jobs:
       # source-level gate; this is the customer's-eye-view backstop. Credential-
       # free OSS, run as a pinned, checksum-verified binary; no GitHub Action
       # dependency and no vendor SaaS callout.
+      - name: Verify backport attestation rejection controls
+        run: python tests/code_coverage_tests/test_image_backport.py -v
+
       - name: Verify installed cache isolation backport
         id: backport
         run: |
