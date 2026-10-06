@@ -1,5 +1,6 @@
 """Tests for the identity-only gateway session token (mint/open, hostile-input totality)."""
 
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -64,6 +65,14 @@ def _mint_refresh() -> str:
     minted = mint_session_refresh_token(PRINCIPAL, KEYS, NOW)
     assert isinstance(minted, MintedSessionToken)
     return minted.token.get_secret_value()
+
+
+def _tamper_signature(token: str) -> str:
+    """Change signed bytes while retaining a canonical, well-formed JWT encoding."""
+    body, signature = token.rsplit(".", 1)
+    raw = bytearray(urlsafe_b64decode(signature + "=" * (-len(signature) % 4)))
+    raw[0] ^= 1
+    return body + "." + urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 def _sign_claims(payload: dict, prefix: str = SESSION_TOKEN_PREFIX, keys: SessionKeys = KEYS) -> str:
@@ -138,8 +147,21 @@ def test_still_valid_one_second_before_expiry():
 
 def test_tampered_signature_is_bad_signature():
     token = _mint_access()
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    tampered = _tamper_signature(token)
     assert isinstance(open_session_token(tampered, KEYS, NOW), SessionBadSignature)
+
+
+def test_noncanonical_signature_encoding_is_malformed():
+    token = _mint_access()
+    body, signature = token.rsplit(".", 1)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    # HS256 ends in two unused encoding bits. Setting one leaves decoded signature
+    # bytes unchanged but makes the base64url representation noncanonical.
+    assert len(signature) % 4 == 3
+    altered = signature[:-1] + alphabet[alphabet.index(signature[-1]) | 1]
+    assert altered != signature
+    assert urlsafe_b64decode(altered + "=") == urlsafe_b64decode(signature + "=")
+    assert isinstance(open_session_token(body + "." + altered, KEYS, NOW), SessionMalformed)
 
 
 def test_key_rotation_invalidates_outstanding_tokens():
@@ -329,7 +351,7 @@ def test_rs256_tampered_signature_is_bad_signature():
     minted = mint_session_token(PRINCIPAL, RSA_KEYS, NOW)
     assert isinstance(minted, MintedSessionToken)
     token = minted.token.get_secret_value()
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    tampered = _tamper_signature(token)
     assert isinstance(open_session_token(tampered, RSA_KEYS, NOW), SessionBadSignature)
 
 
@@ -413,7 +435,7 @@ def test_rotation_window_still_enforces_expiry_and_tamper_on_the_previous_key():
     )
     after = NOW + timedelta(seconds=SESSION_TTL_SECONDS + 1)
     assert isinstance(open_session_token(token, rotated, after), SessionExpired)
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    tampered = _tamper_signature(token)
     assert isinstance(open_session_token(tampered, rotated, NOW), SessionBadSignature)
 
 

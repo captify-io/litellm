@@ -9,7 +9,9 @@ Run with: pytest tests/test_litellm/interactions/test_openapi_compliance.py -v
 
 import json
 import os
-from typing import Any, Dict
+import re
+from collections.abc import Mapping
+from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -32,8 +34,7 @@ def _load_openapi_spec_dict() -> Dict[str, Any]:
         return response.json()
     except Exception as e:  # pragma: no cover - defensive, env-dependent
         pytest.skip(
-            f"Skipping Google Interactions OpenAPI compliance tests - "
-            f"unable to load spec from {OPENAPI_SPEC_URL}: {e}"
+            f"Skipping Google Interactions OpenAPI compliance tests - unable to load spec from {OPENAPI_SPEC_URL}: {e}"
         )
 
 
@@ -42,6 +43,59 @@ def _declared_type_value(variant_schema: Dict[str, Any]) -> Any:
     type_property = variant_schema.get("properties", {}).get("type", {})
     enum_values = type_property.get("enum") or []
     return type_property.get("const") or (enum_values[0] if len(enum_values) == 1 else None)
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    assert isinstance(value, Mapping) and all(isinstance(key, str) for key in value)
+    return cast(Mapping[str, object], value)
+
+
+def _sequence(value: object) -> tuple[object, ...]:
+    assert isinstance(value, (list, tuple))
+    return tuple(value)
+
+
+def _resolve_schema(spec: Mapping[str, object], value: object) -> Mapping[str, object]:
+    schema = _mapping(value)
+    if "$ref" not in schema:
+        return schema
+    reference = schema["$ref"]
+    assert isinstance(reference, str) and reference.startswith("#/components/schemas/")
+    return _mapping(_mapping(_mapping(spec["components"])["schemas"])[reference.removeprefix("#/components/schemas/")])
+
+
+def _interaction_operation(spec: Mapping[str, object], method: str, *, item: bool) -> Mapping[str, object]:
+    matches = tuple(
+        (path, _mapping(value))
+        for path, value in _mapping(spec["paths"]).items()
+        if re.fullmatch(r"/(?:[^/]+/)?interactions(?:/\{[^/{}]+\})?", path)
+        and path.endswith("}") == item
+        and method in _mapping(value)
+    )
+    assert len(matches) == 1, f"Expected exactly one {method.upper()} interactions {'item' if item else 'collection'}"
+    path, path_item = matches[0]
+    operation = _mapping(path_item[method])
+    if item:
+        name = path.rsplit("/", 1)[1][1:-1]
+        parameters = tuple(
+            _mapping(parameter)
+            for parameter in (*_sequence(path_item.get("parameters", ())), *_sequence(operation.get("parameters", ())))
+        )
+        identifiers = tuple(p for p in parameters if p.get("name") == name and p.get("in") == "path")
+        assert len(identifiers) == 1 and identifiers[0].get("required") is True
+        assert _mapping(identifiers[0]["schema"]).get("type") == "string"
+    return operation
+
+
+def _model_interaction_request(spec: Mapping[str, object]) -> Mapping[str, object]:
+    operation = _interaction_operation(spec, "post", item=False)
+    body = _mapping(operation["requestBody"])
+    assert body.get("required") is True
+    request = _resolve_schema(spec, _mapping(_mapping(body["content"])["application/json"])["schema"])
+    variants = tuple(_resolve_schema(spec, value) for value in _sequence(request.get("oneOf", (request,))))
+    models = tuple(value for value in variants if "model" in _mapping(value.get("properties", {})))
+    assert len(models) == 1, "POST interactions must declare exactly one model request variant"
+    return models[0]
 
 
 @pytest.fixture(scope="module")
@@ -60,12 +114,13 @@ class TestRequestCompliance:
     """Tests that our request bodies match the OpenAPI spec."""
 
     def test_create_model_interaction_request_schema(self, spec_dict):
-        """Verify CreateModelInteractionParams schema fields."""
-        schema = spec_dict["components"]["schemas"]["CreateModelInteractionParams"]
+        """Verify writable model request fields on the actual create operation."""
+        schema = _model_interaction_request(spec_dict)
 
         # Required fields per spec
         assert "model" in schema["required"]
-        assert "input" in schema["required"]
+        assert not _mapping(_mapping(schema["properties"])["model"]).get("readOnly", False)
+        assert not _mapping(_mapping(schema["properties"])["input"]).get("readOnly", False)
 
         # Check our supported optional fields exist in spec
         our_optional_fields = [
@@ -84,11 +139,12 @@ class TestRequestCompliance:
         spec_properties = schema["properties"]
         for field in our_optional_fields:
             assert field in spec_properties, f"Field '{field}' not in OpenAPI spec"
+            assert not _mapping(spec_properties[field]).get("readOnly", False), f"Field '{field}' is not writable"
             print(f"✓ Field '{field}' exists in spec")
 
     def test_input_types_match_spec(self, spec_dict):
         """Verify input field supports string, Content, Content[], Turn[]."""
-        schema = spec_dict["components"]["schemas"]["CreateModelInteractionParams"]
+        schema = _model_interaction_request(spec_dict)
         input_schema = schema["properties"]["input"]
 
         # The input property may be inline oneOf or a $ref to InteractionsInput
@@ -125,22 +181,18 @@ class TestRequestCompliance:
 
         discriminator = content_schema.get("discriminator")
         if discriminator is not None:
-            assert (
-                discriminator.get("propertyName") == "type"
-            ), f"Content is discriminated on {discriminator.get('propertyName')!r}, not 'type'"
+            assert discriminator.get("propertyName") == "type", (
+                f"Content is discriminated on {discriminator.get('propertyName')!r}, not 'type'"
+            )
 
         variant_names = [
-            option["$ref"].split("/")[-1]
-            for option in content_schema.get("oneOf", [])
-            if "$ref" in option
+            option["$ref"].split("/")[-1] for option in content_schema.get("oneOf", []) if "$ref" in option
         ]
         assert variant_names, f"Content is not a union of named variants: {content_schema}"
 
         mapping = (discriminator or {}).get("mapping") or {}
         type_values = {
-            variant: mapping_value
-            for mapping_value, ref in mapping.items()
-            for variant in [ref.split("/")[-1]]
+            variant: mapping_value for mapping_value, ref in mapping.items() for variant in [ref.split("/")[-1]]
         } or {
             variant: _declared_type_value(spec_dict["components"]["schemas"].get(variant, {}))
             for variant in variant_names
@@ -191,7 +243,9 @@ class TestRequestCompliance:
             for option in spec_dict["components"]["schemas"]["Step"]["oneOf"]
             if "$ref" in option
         }
-        assert {"UserInputStep", "ModelOutputStep"} <= step_variants, f"Step union is missing role steps: {step_variants}"
+        assert {"UserInputStep", "ModelOutputStep"} <= step_variants, (
+            f"Step union is missing role steps: {step_variants}"
+        )
 
         for step_name, type_value in [("UserInputStep", "user_input"), ("ModelOutputStep", "model_output")]:
             step_schema = spec_dict["components"]["schemas"][step_name]
@@ -261,9 +315,7 @@ class TestResponseCompliance:
         expected_fields = ["total_input_tokens", "total_output_tokens", "total_tokens"]
 
         for field in expected_fields:
-            assert (
-                field in usage_schema["properties"]
-            ), f"Usage field '{field}' not in spec"
+            assert field in usage_schema["properties"], f"Usage field '{field}' not in spec"
             print(f"✓ Usage field '{field}' exists")
 
 
@@ -282,9 +334,7 @@ class TestToolsCompliance:
         """Verify FunctionDeclaration schema for function tools."""
         if "FunctionDeclaration" in spec_dict["components"]["schemas"]:
             func_schema = spec_dict["components"]["schemas"]["FunctionDeclaration"]
-            assert "name" in func_schema.get(
-                "properties", {}
-            ) or "name" in func_schema.get("required", [])
+            assert "name" in func_schema.get("properties", {}) or "name" in func_schema.get("required", [])
             print("✓ FunctionDeclaration schema found")
         else:
             print("⚠ FunctionDeclaration schema not found (may be nested)")
@@ -295,43 +345,114 @@ class TestEndpointCompliance:
 
     def test_create_endpoint_exists(self, spec_dict):
         """Verify POST /interactions endpoint exists."""
-        paths = spec_dict["paths"]
-
-        # Find the create interactions endpoint
-        create_path = None
-        for path, methods in paths.items():
-            if "interactions" in path and "post" in methods:
-                create_path = path
-                break
-
-        assert create_path is not None, "POST /interactions endpoint not found"
-        print(f"✓ Create endpoint: POST {create_path}")
+        _interaction_operation(spec_dict, "post", item=False)
 
     def test_get_endpoint_exists(self, spec_dict):
         """Verify GET /interactions/{id} endpoint exists."""
-        paths = spec_dict["paths"]
-
-        get_path = None
-        for path, methods in paths.items():
-            if "{id}" in path and "interactions" in path and "get" in methods:
-                get_path = path
-                break
-
-        assert get_path is not None, "GET /interactions/{id} endpoint not found"
-        print(f"✓ Get endpoint: GET {get_path}")
+        _interaction_operation(spec_dict, "get", item=True)
 
     def test_delete_endpoint_exists(self, spec_dict):
         """Verify DELETE /interactions/{id} endpoint exists."""
-        paths = spec_dict["paths"]
+        _interaction_operation(spec_dict, "delete", item=True)
 
-        delete_path = None
-        for path, methods in paths.items():
-            if "{id}" in path and "interactions" in path and "delete" in methods:
-                delete_path = path
-                break
 
-        assert delete_path is not None, "DELETE /interactions/{id} endpoint not found"
-        print(f"✓ Delete endpoint: DELETE {delete_path}")
+def _operation_fixture(
+    *,
+    model_name="RenamedModel",
+    parameter_name="renamedId",
+    omitted_field=None,
+    omitted_method=None,
+    read_only_field=None,
+    input_required=False,
+):
+    fields = (
+        "model",
+        "input",
+        "tools",
+        "system_instruction",
+        "generation_config",
+        "stream",
+        "store",
+        "background",
+        "response_modalities",
+        "response_format",
+        "response_mime_type",
+        "previous_interaction_id",
+    )
+    model = {
+        "required": ["model", "input"] if input_required else ["model"],
+        "properties": {field: {"readOnly": field == read_only_field} for field in fields if field != omitted_field},
+    }
+    return {
+        "components": {"schemas": {model_name: model, "UnusedOldModel": {"properties": {"model": {}}}}},
+        "paths": {
+            "/v1beta/interactions": {
+                method: {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {"schema": {"oneOf": [{"$ref": "#/components/schemas/" + model_name}]}}
+                        },
+                    }
+                }
+                for method in ("post",)
+                if method != omitted_method
+            },
+            "/v1beta/interactions/{" + parameter_name + "}": {
+                method: {
+                    "parameters": [
+                        {"name": parameter_name, "in": "path", "required": True, "schema": {"type": "string"}}
+                    ]
+                }
+                for method in ("get", "delete")
+                if method != omitted_method
+            },
+            "/v1beta/interactions/{id}/cancel": {"post": {}},
+        },
+    }
+
+
+@pytest.mark.parametrize("input_required", (True, False))
+def test_renamed_request_and_path_parameter_preserve_supported_contract(input_required):
+    spec = _operation_fixture(input_required=input_required)
+    TestRequestCompliance().test_create_model_interaction_request_schema(spec)
+    TestEndpointCompliance().test_get_endpoint_exists(spec)
+    TestEndpointCompliance().test_delete_endpoint_exists(spec)
+    assert ("input" in _model_interaction_request(spec)["required"]) is input_required
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "model",
+        "input",
+        "tools",
+        "system_instruction",
+        "generation_config",
+        "stream",
+        "store",
+        "background",
+        "response_modalities",
+        "response_format",
+        "response_mime_type",
+        "previous_interaction_id",
+    ),
+)
+def test_missing_supported_request_field_is_not_hidden_by_schema_resolution(field):
+    with pytest.raises((AssertionError, KeyError)):
+        TestRequestCompliance().test_create_model_interaction_request_schema(_operation_fixture(omitted_field=field))
+
+
+@pytest.mark.parametrize("field", ("model", "input", "tools"))
+def test_read_only_request_field_is_rejected(field):
+    with pytest.raises(AssertionError):
+        TestRequestCompliance().test_create_model_interaction_request_schema(_operation_fixture(read_only_field=field))
+
+
+@pytest.mark.parametrize("method", ("post", "get", "delete"))
+def test_missing_method_is_not_replaced_by_another_interaction_operation(method):
+    with pytest.raises(AssertionError):
+        _interaction_operation(_operation_fixture(omitted_method=method), method, item=method != "post")
 
 
 if __name__ == "__main__":
@@ -350,6 +471,4 @@ if __name__ == "__main__":
             if method in ["get", "post", "delete", "put", "patch"]:
                 print(f"  {method.upper()} {path}")
 
-    print(
-        f"\nSchemas: {list(spec.get('components', {}).get('schemas', {}).keys())[:10]}..."
-    )
+    print(f"\nSchemas: {list(spec.get('components', {}).get('schemas', {}).keys())[:10]}...")

@@ -137,29 +137,67 @@ semgrep-sast:
   rules:
     - when: never
 
+# The standard analyzer has no Docker contract. Probe the exact pushed digest
+# in this predecessor, then recompute its source/proof/VEX binding in analyzer.
+attest-image-backport:
+  stage: test
+  needs:
+    - job: build-image
+      artifacts: true
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - test -n "$LITELLM_IMAGE"
+    - docker pull "$LITELLM_IMAGE"
+    - python3 scripts/semantic_cache_backport.py prepare --image "$LITELLM_IMAGE" --revision "$CI_COMMIT_SHA" --output-dir backport-proof
+  allow_failure: false
+  artifacts:
+    when: always
+    paths:
+      - backport-proof/
+    expire_in: 1 week
+  rules:
+    - when: always
+  tags:
+    - al2023-fips-shell
+
 container_scanning:
   stage: test
-  # Override the analyzer template default that disables build artifact downloads.
+  # Fetch this exact source for analyzer-native Ruby verification; no Docker.
   dependencies:
     - build-image
+    - attest-image-backport
   before_script:
     - 'test -n "$LITELLM_IMAGE"'
     - export CS_IMAGE="$LITELLM_IMAGE"
   variables:
+    GIT_STRATEGY: fetch
     CS_IMAGE: "$LITELLM_IMAGE"
+    CS_DISABLE_LANGUAGE_VULNERABILITY_SCAN: "false"
     SECURE_LOG_LEVEL: debug
     CI_GITLAB_FIPS_MODE: "false"
   needs:
     - job: build-image
       artifacts: true
+    - job: attest-image-backport
+      artifacts: true
     - job: dependency-scanning
       artifacts: true
       optional: true
+  script:
+    - ruby scripts/verify_semantic_cache_backport.rb "$LITELLM_IMAGE" "$CI_COMMIT_SHA" backport-proof
+    - TRIVY_VEX="" gtcs scan
+    - cp gl-container-scanning-report.json backport-proof/gl-container-scanning-raw.json
+    - ruby scripts/verify_semantic_cache_backport.rb "$LITELLM_IMAGE" "$CI_COMMIT_SHA" backport-proof
+    - TRIVY_SKIP_DB_UPDATE=true TRIVY_VEX="$CI_PROJECT_DIR/backport-proof/fixed.vex.json" gtcs scan
+    - ruby scripts/verify_semantic_cache_backport.rb --reports backport-proof/gl-container-scanning-raw.json gl-container-scanning-report.json backport-proof/suppressed-findings.json
   allow_failure: false
   artifacts:
+    when: always
     paths:
       - gl-container-scanning-report.json
       - gl-sbom*.cdx.json
+      - backport-proof/
     reports:
       container_scanning: gl-container-scanning-report.json
     expire_in: 1 week

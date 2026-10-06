@@ -34,6 +34,112 @@ from litellm.proxy.auth.handle_jwt import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [None, False, "true", 1, {}, []])
+async def test_unverified_jwt_email_is_never_an_identity_or_link_input(verified):
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(user_id_jwt_field="sub", user_email_jwt_field="email")
+    claims = {"sub": "attacker-subject", "email": "victim@example.com"}
+    if verified is not None:
+        claims["email_verified"] = verified
+    assert handler.get_user_email(claims, "victim@example.com") is None
+    assert await JWTAuthManager.get_user_info(handler, claims) == ("attacker-subject", None, None)
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(user_email_jwt_field="email")
+    assert await JWTAuthManager.get_user_info(handler, claims) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    "identity_field,email_field",
+    [("email", None), ("user.email", "user.email"), ("metadata.user.email", "user.email"), ("mailbox", "mailbox")],
+)
+def test_email_as_jwt_user_id_also_requires_verified_claim(identity_field, email_field):
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(user_id_jwt_field=identity_field, user_email_jwt_field=email_field)
+    claims = {"email": "victim@example.com", "user": {"email": "victim@example.com"}, "mailbox": "victim@example.com"}
+    assert handler.get_user_id(claims, "victim@example.com") is None
+    assert handler.get_user_id({**claims, "email_verified": True}, None) == "victim@example.com"
+
+
+@pytest.mark.parametrize("verified", [None, False, "true", 1, True])
+def test_issuer_normalized_email_identity_requires_literal_verification(verified):
+    from litellm.proxy._types import JWTIssuerConfig
+
+    issuer = JWTIssuerConfig(
+        issuer="https://issuer.example", audience="client", user_id_jwt_field="mailbox", user_email_jwt_field="mailbox"
+    )
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(issuers=[issuer])
+    claims = handler._apply_issuer_claim_mappings({"mailbox": "victim@example.com", "email_verified": verified}, issuer)
+    expected = "victim@example.com" if verified is True else None
+    assert handler.get_user_id(claims, None) == expected
+    assert handler.get_user_email(claims, None) == expected
+
+
+@pytest.mark.parametrize("issuer_fields", [{}, {"user_id_jwt_field": "missing"}])
+def test_issuer_fallback_to_global_email_identity_still_requires_verification(issuer_fields):
+    from litellm.proxy._types import JWTIssuerConfig
+
+    issuer = JWTIssuerConfig(issuer="https://issuer.example", audience="client", **issuer_fields)
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(
+        issuers=[issuer], user_id_jwt_field="mailbox", user_email_jwt_field="mailbox"
+    )
+    claims = handler._apply_issuer_claim_mappings({"mailbox": "victim@example.com"}, issuer)
+    assert handler.get_user_id(claims, None) is None
+    assert handler.get_user_id({**claims, "email_verified": True}, None) == "victim@example.com"
+
+
+@pytest.mark.parametrize("identity", [False, 1, ["person@example.com"]])
+def test_verified_normalized_identity_must_still_be_a_string(identity):
+    from litellm.proxy._types import JWTIssuerConfig
+
+    issuer = JWTIssuerConfig(
+        issuer="https://issuer.example", audience="client", user_id_jwt_field="mailbox", user_email_jwt_field="mailbox"
+    )
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(issuers=[issuer])
+    claims = handler._apply_issuer_claim_mappings({"mailbox": identity, "email_verified": True}, issuer)
+    assert handler.get_user_id(claims, None) is None
+    assert handler.get_user_email(claims, None) is None
+
+
+@pytest.mark.asyncio
+async def test_verified_jwt_email_and_stable_subject_remain_available():
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(user_id_jwt_field="sub", user_email_jwt_field="email")
+    claims = {"sub": "real-subject", "email": "person@example.com", "email_verified": True}
+    assert await JWTAuthManager.get_user_info(handler, claims) == ("real-subject", "person@example.com", None)
+
+
+@pytest.mark.asyncio
+async def test_unverified_jwt_cannot_reach_admin_email_fallback():
+    from types import SimpleNamespace
+    from litellm.proxy.auth.auth_checks import _get_fuzzy_user_object
+
+    handler = JWTHandler()
+    handler.litellm_jwtauth = LiteLLM_JWTAuth(user_id_jwt_field="sub", user_email_jwt_field="email")
+    subject, email, _ = await JWTAuthManager.get_user_info(
+        handler, {"sub": "attacker", "email": "admin@example.com", "email_verified": False}
+    )
+    table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        find_many=AsyncMock(
+            return_value=[
+                LiteLLM_UserTable(
+                    user_id="victim", user_email="admin@example.com", user_role=LitellmUserRoles.PROXY_ADMIN
+                )
+            ]
+        ),
+        update_many=AsyncMock(),
+    )
+    assert (
+        await _get_fuzzy_user_object(SimpleNamespace(db=SimpleNamespace(litellm_usertable=table)), subject, email)
+        is None
+    )
+    table.find_many.assert_not_awaited()
+    table.update_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_map_user_to_teams_user_already_in_team():
     """Test that no action is taken when user is already in team"""
     # Setup test data
@@ -973,6 +1079,7 @@ async def test_nested_jwt_field_access():
 
     # Test token with nested claims
     nested_token = {
+        "email_verified": True,
         "user": {"sub": "u123", "email": "user@example.com"},
         "resource_access": {"my-client": {"roles": ["admin", "user"]}},
         "groups": ["team1", "team2"],
@@ -984,6 +1091,7 @@ async def test_nested_jwt_field_access():
 
     # Test flat token for backward compatibility
     flat_token = {
+        "email_verified": True,
         "sub": "u123",
         "email": "user@example.com",
         "roles": ["admin", "user"],
@@ -1096,6 +1204,7 @@ async def test_nested_jwt_field_missing_paths():
 
     # Test token with missing nested paths
     incomplete_token = {
+        "email_verified": True,
         "user": {
             "name": "test user"
             # missing "sub" and "email"
@@ -1185,6 +1294,7 @@ async def test_metadata_prefix_handling_in_nested_fields():
 
     # Test token with proper structure for metadata prefix removal
     token = {
+        "email_verified": True,
         "user": {
             "email": "user@example.com"  # This will be accessed when metadata.user.email is used
         },
@@ -5003,6 +5113,7 @@ async def test_global_jwt_ignores_user_supplied_internal_claims(monkeypatch):
         audience="some-other-client",
         kid="global-key",
         extra_claims={
+            "email_verified": True,
             "email": "real-user@example.com",
             "team": {"id": "real-team"},
             "teams": ["real-team", "secondary-team"],
@@ -5062,6 +5173,7 @@ async def test_multi_issuer_jwt_strips_unmapped_internal_claims(monkeypatch):
         audience="expected-audience",
         kid="issuer-key",
         extra_claims={
+            "email_verified": True,
             "email": "real-user@example.com",
             JWTHandler.LITELLM_USER_ID_CLAIM: "victim-user",
             JWTHandler.LITELLM_TEAM_ID_CLAIM: "victim-team",

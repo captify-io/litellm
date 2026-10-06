@@ -69,6 +69,9 @@ exit 0
 
 NPM_STUB = """#!/bin/sh
 case "$*" in
+    "run check:braces")
+        [ "${STUB_FAIL:-}" = "vendored-braces" ] && exit 1
+        ;;
     "run gen:api")
         [ "${STUB_FAIL:-}" = "gen-api" ] && exit 1
         ;;
@@ -379,6 +382,7 @@ def test_interrupt_spares_the_invoking_process(tmp_path: Path) -> None:
     [
         ("make-lint", "Python lint failed"),
         ("eslint", "Dashboard lint failed"),
+        ("vendored-braces", "Dashboard lint failed"),
         ("gen-api", "npm run gen:api failed"),
     ],
 )
@@ -389,15 +393,32 @@ def test_a_failing_block_fails_the_whole_run(tmp_path: Path, fail: str, message:
     assert message in proc.stdout + proc.stderr
 
 
+def test_vendor_archive_only_change_cannot_skip_security_check(tmp_path: Path) -> None:
+    repo, bin_dir = _sandbox(tmp_path)
+    _commit_all(repo, "base")
+    _set_base_ref(repo)
+    vendor = repo / "ui" / "litellm-dashboard" / "vendor" / "braces-depth-guard"
+    vendor.mkdir(parents=True)
+    (vendor / "patched.tgz").write_bytes(b"changed archive")
+    proc = _run(repo, bin_dir, {"STUB_FAIL": "vendored-braces"})
+    assert proc.returncode == 1
+    assert "Dashboard lint failed" in proc.stdout + proc.stderr
+    assert "ran:     dashboard lint and vendored dependency check" in proc.stdout
+    assert "check: FAIL" in proc.stdout
+
+
 def test_run_ends_with_a_summary_of_ran_and_skipped_blocks(tmp_path: Path) -> None:
     repo, bin_dir = _sandbox(tmp_path)
     proc = _run(repo, bin_dir, {})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "check: summary" in proc.stdout
     assert "ran:     Python lint (make lint)" in proc.stdout
-    assert "ran:     dashboard lint (prettier + eslint + lint budgets)" in proc.stdout
+    assert "ran:     dashboard lint and vendored dependency check" in proc.stdout
     assert "ran:     dashboard API-type sync (npm run gen:api)" in proc.stdout
-    assert "skipped: tests/e2e checks (basedpyright + raw HTTP client ban) (no tests/e2e Python files in scope)" in proc.stdout
+    assert (
+        "skipped: tests/e2e checks (basedpyright + raw HTTP client ban) (no tests/e2e Python files in scope)"
+        in proc.stdout
+    )
     assert "check: PASS" in proc.stdout
     assert "check: FAIL" not in proc.stdout
 

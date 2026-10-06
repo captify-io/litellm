@@ -26,6 +26,13 @@ on:
       - ui/Dockerfile
       - ui/nginx.conf
       - .github/workflows/image-scan.yml
+      - litellm/caching/caching.py
+      - litellm/proxy/litellm_pre_call_utils.py
+      - security/backports/**
+      - scripts/semantic_cache_backport.py
+      - scripts/verify_semantic_cache_backport.rb
+      - tests/proxy_migration_tests/test_semantic_cache_backport_guard.py
+      - tests/test_litellm/caching/test_semantic_cache_metadata_isolation.py
   schedule:
     - cron: "41 6 * * *"
   workflow_dispatch:
@@ -63,7 +70,10 @@ jobs:
       # Dockerfiles share the same wolfi base and apk set, so OS-layer coverage
       # is the same; matrix-scan if those variants ever diverge.
       - name: Build runtime image
-        run: docker build -f docker/Dockerfile.non_root -t litellm-image-scan:${{ github.sha }} .
+        run: >-
+          docker build -f docker/Dockerfile.non_root
+          --label org.opencontainers.image.revision=${{ github.sha }}
+          -t litellm-image-scan:${{ github.sha }} .
 
       # The prisma bake must migrate a fresh DB with no egress as an arbitrary
       # non-root uid (OpenShift restricted-v2 / air-gapped / readOnlyRootFilesystem).
@@ -80,7 +90,7 @@ jobs:
           LITELLM_IMAGE: litellm-image-scan:${{ github.sha }}
         run: |
           python -m pip install "pytest==9.0.3"
-          python -m pytest tests/proxy_migration_tests/test_offline_image_migration.py -v
+          python -m pytest tests/proxy_migration_tests/test_offline_image_migration.py tests/proxy_migration_tests/test_semantic_cache_backport_guard.py -v
 
       # Scans the whole shipped artifact: OS/apk plus every language package
       # baked into the image, including ones no lockfile declares (e.g. prisma's
@@ -88,14 +98,41 @@ jobs:
       # source-level gate; this is the customer's-eye-view backstop. Credential-
       # free OSS, run as a pinned, checksum-verified binary; no GitHub Action
       # dependency and no vendor SaaS callout.
+      - name: Verify installed cache isolation backport
+        id: backport
+        run: |
+          python scripts/semantic_cache_backport.py prepare \
+            --image litellm-image-scan:${{ github.sha }} \
+            --revision ${{ github.sha }} --output-dir backport-proof
+          python -c 'import json,os; p=json.load(open("backport-proof/proof.json")); print("image_id="+p["identity"]["imageId"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
+
+      - name: Preserve raw image vulnerability findings
+        env:
+          GRYPE_MATCH_PYTHON_USING_CPES: "true"
+          BACKPORT_IMAGE_ID: ${{ steps.backport.outputs.image_id }}
+        run: |
+          "$RUNNER_TEMP/grype" "docker:$BACKPORT_IMAGE_ID" --output json > backport-proof/grype-raw.json
+
       - name: Scan image for fixable HIGH/CRITICAL CVEs
         env:
           GRYPE_MATCH_PYTHON_USING_CPES: "true"
+          GRYPE_DB_AUTO_UPDATE: "false"
+          BACKPORT_IMAGE_ID: ${{ steps.backport.outputs.image_id }}
         run: |
-          "$RUNNER_TEMP/grype" litellm-image-scan:${{ github.sha }} \
-            --only-fixed \
-            --fail-on high \
-            --output table
+          python scripts/semantic_cache_backport.py verify \
+            --image litellm-image-scan:${{ github.sha }} \
+            --revision ${{ github.sha }} --output-dir backport-proof
+          "$RUNNER_TEMP/grype" "docker:$BACKPORT_IMAGE_ID" \
+            --vex backport-proof/fixed.vex.json --show-suppressed \
+            --only-fixed --fail-on high --output json > backport-proof/grype-gated.json
+
+      - name: Retain raw findings and exact backport proof
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: runtime-image-backport-${{ github.sha }}
+          path: backport-proof/
+          retention-days: 30
 
   runtime-image:
     name: runtime-image

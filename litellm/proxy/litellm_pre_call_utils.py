@@ -209,6 +209,7 @@ LITELLM_TRACE_CONTROL_METADATA_FIELDS: Final = frozenset(
 )
 
 _UNTRUSTED_ROOT_CONTROL_FIELDS: Final = (
+    "cache_key",
     "proxy_server_request",
     "standard_logging_object",
     "secret_fields",
@@ -264,6 +265,7 @@ _UNTRUSTED_ROOT_CONTROL_FIELDS: Final = (
 )
 
 _UNTRUSTED_METADATA_CONTROL_FIELDS: Final = (
+    "user_api_key",
     "disable_global_guardrails",
     "disable_global_guardrail",
     "opted_out_global_guardrails",
@@ -1717,6 +1719,10 @@ async def add_litellm_data_to_request(
         if _allow_client_mock_response and _internal_key in _CLIENT_MOCK_CONTROL_FIELDS:
             continue
         data.pop(_internal_key, None)
+    # Cache keys may be memoized by trusted SDK/router code after this HTTP
+    # boundary. An inbound preset would bypass the authenticated tenant scope.
+    if isinstance(_client_litellm_params := data.get("litellm_params"), dict):
+        _client_litellm_params.pop("preset_cache_key", None)
     _reject_url_valued_destinations(data)
     _raw_metadata_by_field: Final = {
         _metadata_field: data.pop(_metadata_field)

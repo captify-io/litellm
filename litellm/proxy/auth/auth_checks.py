@@ -164,6 +164,8 @@ class _PrismaVectorStoreRow(Protocol):
 
 class _PrismaUserRow(Protocol):
     user_id: str
+    sso_user_id: str | None
+    user_email: str | None
 
     @property
     def organization_memberships(self) -> Sequence[_PrismaModelDumpRow | None] | None: ...
@@ -192,6 +194,8 @@ class _PrismaAuthTable(Protocol[RowT_co]):
     ) -> Sequence[RowT_co]: ...
 
     async def update(self, *, where: Mapping[str, object], data: Mapping[str, object]) -> RowT_co | None: ...
+
+    async def update_many(self, *, where: Mapping[str, object], data: Mapping[str, object]) -> int: ...
 
     async def create(self, *, data: Mapping[str, object], include: Mapping[str, object] | None = None) -> RowT_co: ...
 
@@ -2280,46 +2284,70 @@ def get_role_based_routes(
     )
 
 
+class _UserEmailMatch(TypedDict):
+    equals: ReadOnly[str]
+    mode: ReadOnly[Literal["insensitive"]]
+
+
+class _UserIdentityFilter(TypedDict, total=False):
+    user_id: ReadOnly[str]
+    sso_user_id: ReadOnly[str | None]
+    user_email: ReadOnly[_UserEmailMatch]
+
+
+class _UserMembershipInclude(TypedDict):
+    organization_memberships: ReadOnly[bool]
+
+
 async def _get_fuzzy_user_object(
     prisma_client: PrismaClient,
     sso_user_id: str | None = None,
     user_email: str | None = None,
 ) -> "_PrismaUserRow | None":
-    """
-    Checks if sso user is in db.
-
-    Called when user id match is not found in db.
-
-    - Check if sso_user_id is user_id in db
-    - Check if sso_user_id is sso_user_id in db
-    - Check if user_email is user_email in db
-    - If not, create new user with user_email and sso_user_id and user_id = sso_user_id
-    """
-
-    response = None
+    table: Final = _user_table(UserRepository(prisma_client))
+    membership_include: Final[_UserMembershipInclude] = {"organization_memberships": True}
     if sso_user_id is not None:
-        response = await _user_table(UserRepository(prisma_client)).find_unique(
-            where={"sso_user_id": sso_user_id},
-            include={"organization_memberships": True},
+        subject_filter: Final[_UserIdentityFilter] = {"sso_user_id": sso_user_id}
+        subject_match: Final = await table.find_unique(
+            where=subject_filter,
+            include=membership_include,
         )
-
-    if response is None and user_email is not None:
-        # Use case-insensitive query to handle emails with different casing
-        # This matches the pattern used in _check_duplicate_user_email
-        response = await _user_table(UserRepository(prisma_client)).find_first(
-            where={"user_email": {"equals": user_email, "mode": "insensitive"}},
-            include={"organization_memberships": True},
-        )
-
-        if response is not None and sso_user_id is not None:  # update sso_user_id
-            asyncio.create_task(  # background task to update user with sso id
-                _user_table(UserRepository(prisma_client)).update(
-                    where={"user_id": response.user_id},
-                    data={"sso_user_id": sso_user_id},
-                )
-            )
-
-    return response
+        if subject_match is not None:
+            return subject_match
+    if user_email is None:
+        return None
+    email_filter: Final[_UserIdentityFilter] = {"user_email": {"equals": user_email, "mode": "insensitive"}}
+    matches: Final = await table.find_many(
+        where=email_filter,
+        include=membership_include,
+        take=2,
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Email matches multiple identities; explicit account linking is required")
+    candidate: Final = matches[0]
+    if sso_user_id is None or candidate.sso_user_id == sso_user_id:
+        return candidate
+    if candidate.sso_user_id is not None:
+        raise ValueError("Email identity already belongs to another subject")
+    link_filter: Final[_UserIdentityFilter] = {
+        "user_id": candidate.user_id,
+        "sso_user_id": None,
+        "user_email": {"equals": user_email, "mode": "insensitive"},
+    }
+    link_data: Final[_UserIdentityFilter] = {"sso_user_id": sso_user_id}
+    await table.update_many(where=link_filter, data=link_data)
+    linked_filter: Final[_UserIdentityFilter] = {"user_id": candidate.user_id}
+    linked: Final = await table.find_unique(where=linked_filter, include=membership_include)
+    if (
+        linked is None
+        or linked.sso_user_id != sso_user_id
+        or linked.user_email is None
+        or linked.user_email.casefold() != user_email.casefold()
+    ):
+        raise ValueError("Email identity changed during account linking")
+    return linked
 
 
 async def _backfill_null_user_email(
