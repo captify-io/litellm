@@ -164,7 +164,7 @@ class ImageBackportTests(unittest.TestCase):
             if changed in ("header", "body", "config", "revision"):
                 self.assertFalse(any(call[:2] == ("docker", "run") for call in calls))
 
-    def test_real_grype_metadata_and_record_locations(self):
+    def test_real_grype_metadata_record_and_direct_url_locations(self):
         match = finding()
         metadata = match["artifact"]["locations"][0]
         record = {
@@ -173,11 +173,28 @@ class ImageBackportTests(unittest.TestCase):
             "annotations": {"evidence": "supporting"},
         }
         match["artifact"]["locations"].append(record)
+        direct_url = {
+            "path": metadata["path"].replace("METADATA", "direct_url.json"),
+            "accessPath": metadata["accessPath"].replace("METADATA", "direct_url.json"),
+            "annotations": {"evidence": "supporting"},
+        }
+        match["artifact"]["locations"].append(direct_url)
         self.assertTrue(MODULE.is_backport(match, proof()))
-        for altered in ("path", "accessPath"):
+        for index in (1, 2):
+            for altered in ("path", "accessPath"):
+                candidate = copy.deepcopy(match)
+                candidate["artifact"]["locations"][index][altered] = "/another/installation/" + (
+                    "RECORD" if index == 1 else "direct_url.json"
+                )
+                with self.subTest(index=index, altered=altered), self.assertRaises(ValueError):
+                    MODULE.is_backport(candidate, proof())
+        for metadata_locations in (
+            [record, direct_url],
+            [{**metadata, "annotations": {"evidence": "supporting"}}, record, direct_url],
+        ):
             candidate = copy.deepcopy(match)
-            candidate["artifact"]["locations"][1][altered] = "/another/installation/RECORD"
-            with self.subTest(altered=altered), self.assertRaises(ValueError):
+            candidate["artifact"]["locations"] = metadata_locations
+            with self.subTest(metadata_locations=metadata_locations), self.assertRaises(ValueError):
                 MODULE.is_backport(candidate, proof())
 
     def test_exact_image_and_subcomponent_only(self):

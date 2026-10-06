@@ -199,7 +199,12 @@ def is_backport(match: Object, proof: Object) -> bool:
             for location in locations
         )
         and all(
-            location.get("path") in (metadata_path, metadata_path.removesuffix("METADATA") + "RECORD")
+            location.get("path")
+            in (
+                metadata_path,
+                metadata_path.removesuffix("METADATA") + "RECORD",
+                metadata_path.removesuffix("METADATA") + "direct_url.json",
+            )
             and location.get("accessPath") == location.get("path")
             for location in locations
         ),
