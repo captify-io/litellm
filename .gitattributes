@@ -1,2 +1,5 @@
 *.ipynb linguist-vendored
 ui/litellm-dashboard/src/lib/http/schema.d.ts linguist-generated
+
+# Unified diff represents blank context lines with a required leading space.
+ui/litellm-dashboard/vendor/braces-depth-guard/depth-guard.patch whitespace=-blank-at-eol

@@ -22,7 +22,10 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 
 WORKDIR /ui
 
+RUN apk add --no-cache patch
+
 COPY ui/litellm-dashboard/package.json ui/litellm-dashboard/package-lock.json ./
+COPY ui/litellm-dashboard/vendor/ ./vendor/
 RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline
 
 COPY ui/litellm-dashboard/ ./

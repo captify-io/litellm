@@ -6,6 +6,7 @@ tests
 .git
 .devcontainer
 *.tgz
+!ui/litellm-dashboard/vendor/braces-depth-guard/*.tgz
 log.txt
 docker/Dockerfile.*
 

@@ -395,7 +395,7 @@ def test_run_ends_with_a_summary_of_ran_and_skipped_blocks(tmp_path: Path) -> No
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "check: summary" in proc.stdout
     assert "ran:     Python lint (make lint)" in proc.stdout
-    assert "ran:     dashboard lint (prettier + eslint + lint budgets)" in proc.stdout
+    assert "ran:     dashboard lint and vendored dependency check" in proc.stdout
     assert "ran:     dashboard API-type sync (npm run gen:api)" in proc.stdout
     assert "skipped: tests/e2e checks (basedpyright + raw HTTP client ban) (no tests/e2e Python files in scope)" in proc.stdout
     assert "check: PASS" in proc.stdout
