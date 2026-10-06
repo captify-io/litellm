@@ -10,10 +10,15 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scripts/security"))
+PROBE_SPEC = importlib.util.spec_from_file_location(
+    "semantic_cache_probe", ROOT / "scripts/security/semantic_cache_probe.py"
+)
+PROBE_MODULE = importlib.util.module_from_spec(PROBE_SPEC)
+PROBE_SPEC.loader.exec_module(PROBE_MODULE)
 SPEC = importlib.util.spec_from_file_location("image_backport", ROOT / "scripts/security/image_backport.py")
 MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+with patch.dict(sys.modules, {"semantic_cache_probe": PROBE_MODULE}):
+    SPEC.loader.exec_module(MODULE)
 
 
 def proof():
