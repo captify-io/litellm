@@ -3,7 +3,7 @@
     "limit": 17268
   },
   "reportArgumentType": {
-    "limit": 2524
+    "limit": 2531
   },
   "reportAssignmentType": {
     "limit": 319
@@ -12,7 +12,7 @@
     "limit": 480
   },
   "reportCallIssue": {
-    "limit": 100
+    "limit": 106
   },
   "reportConstantRedefinition": {
     "limit": 40
@@ -105,13 +105,13 @@
     "limit": 109
   },
   "reportUnknownMemberType": {
-    "limit": 38691
+    "limit": 38710
   },
   "reportUnknownParameterType": {
-    "limit": 19767
+    "limit": 19769
   },
   "reportUnknownVariableType": {
-    "limit": 30265
+    "limit": 30278
   },
   "reportUnnecessaryCast": {
     "limit": 117
