@@ -256,10 +256,22 @@ async def test_jwt_email_account_resolution_cannot_rebind_unverified_identity(ve
             return own
         return None
 
+    async def update_many(*, where, data):
+        if data == {"sso_user_id": subject}:
+            assert where == {
+                "user_id": victim.user_id,
+                "sso_user_id": None,
+                "user_email": {"equals": victim.user_email, "mode": "insensitive"},
+            }
+            assert victim.sso_user_id is None
+            victim.sso_user_id = subject
+            return 1
+        return 0
+
     table.find_unique = AsyncMock(side_effect=find_unique)
-    table.find_first = AsyncMock(return_value=victim)
+    table.find_many = AsyncMock(return_value=[victim])
     table.update = AsyncMock(return_value=victim)
-    table.update_many = AsyncMock(return_value=0)
+    table.update_many = AsyncMock(side_effect=update_many)
     table.create = AsyncMock()
     cache = MagicMock()
     cache.async_get_cache = AsyncMock(
@@ -287,13 +299,21 @@ async def test_jwt_email_account_resolution_cannot_rebind_unverified_identity(ve
             assert result[0] == victim
     await asyncio.sleep(0)
     if not verified:
-        table.find_first.assert_not_awaited()
+        table.find_many.assert_not_awaited()
         table.update.assert_not_awaited()
         table.update_many.assert_not_awaited()
         table.create.assert_not_awaited()
         assert all(call.kwargs["key"] != victim.user_id for call in cache.async_get_cache.call_args_list)
     elif lookup == "fuzzy":
-        table.update.assert_awaited_once_with(where={"user_id": victim.user_id}, data={"sso_user_id": subject})
+        table.update_many.assert_awaited_once_with(
+            where={
+                "user_id": victim.user_id,
+                "sso_user_id": None,
+                "user_email": {"equals": victim.user_email, "mode": "insensitive"},
+            },
+            data={"sso_user_id": subject},
+        )
+        assert result[0].sso_user_id == subject
 
 
 @pytest.mark.asyncio
@@ -308,7 +328,7 @@ async def test_jwt_new_stable_user_stores_only_verified_email(verified):
     prisma = MagicMock()
     table = prisma.db.litellm_usertable
     table.find_unique = AsyncMock(return_value=None)
-    table.find_first = AsyncMock(return_value=None)
+    table.find_many = AsyncMock(return_value=[])
     table.create = AsyncMock(side_effect=lambda *, data, include: LiteLLM_UserTable(**data, organization_memberships=[]))
     cache = MagicMock()
     cache.async_get_cache = AsyncMock(return_value=None)

@@ -6,6 +6,8 @@ This change backports the metadata lookup from [upstream commit 16db51e2](https:
 
 The proxy also removes caller-supplied `user_api_key` before stamping authenticated identity. Its existing prefix check covered `user_api_key_*` but omitted this bare field. With the upstream lookup alone, a forged bare key in provider metadata could still win over the authenticated key in `litellm_metadata`. The added reserved field closes that path for dictionary and JSON-encoded metadata, including the requester metadata snapshot
 
+HTTP requests also cannot supply a root `cache_key` or nested `litellm_params.preset_cache_key` to bypass the authenticated scope. The ingress removes those values while retaining unrelated nested parameters. Trusted SDK and router cache-key memoization remains supported outside the HTTP boundary
+
 The upstream commit also introduces an optional `semantic_cache_scope: end_user` setting and dashboard controls. That separate feature is not included here. Users sharing one key retain the existing key-scoped behavior; this backport does not claim isolation between those end users
 
 The mapped cache tests check all three semantic backend scope paths, both metadata names and both nesting positions. They also pass requests through the real proxy identity stamping for Chat, Responses, Messages and Bedrock, including forged identity fields in both caller metadata containers. Exact-cache behavior and the existing shared-key behavior remain covered
