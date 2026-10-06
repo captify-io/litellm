@@ -1,7 +1,9 @@
 import logging
 import re
+from unittest.mock import MagicMock
 
 import pytest
+from starlette.requests import Request
 
 from litellm.caching.caching import Cache
 from litellm.types.caching import LiteLLMCacheType
@@ -137,6 +139,83 @@ def test_semantic_cache_key_isolates_tenants():
     )
     assert key_a != key_b
     assert key_a != key_team
+
+
+@pytest.mark.parametrize(
+    "cache_type",
+    [
+        LiteLLMCacheType.REDIS_SEMANTIC,
+        LiteLLMCacheType.VALKEY_SEMANTIC,
+        LiteLLMCacheType.QDRANT_SEMANTIC,
+    ],
+)
+@pytest.mark.parametrize("metadata_name", ["metadata", "litellm_metadata"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("identity_field", ["user_api_key", "user_api_key_team_id", "user_api_key_org_id"])
+def test_semantic_cache_key_isolates_both_metadata_containers(cache_type, metadata_name, nested, identity_field):
+    cache = Cache(type=LiteLLMCacheType.LOCAL)
+    cache.type = cache_type
+
+    def cache_key(identity):
+        metadata = {metadata_name: {identity_field: identity}}
+        kwargs = {"litellm_params": metadata} if nested else metadata
+        return cache.get_cache_key(model="test-model", input="A private question", **kwargs)
+
+    assert cache_key("tenant-a") != cache_key("tenant-b")
+    assert cache_key("tenant-a") == cache_key("tenant-a")
+
+
+@pytest.mark.parametrize(
+    "path", ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/bedrock/model/test/converse"]
+)
+@pytest.mark.asyncio
+async def test_semantic_cache_key_uses_authenticated_route_identity(path):
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.litellm_pre_call_utils import add_litellm_data_to_request
+
+    cache = Cache(type=LiteLLMCacheType.LOCAL)
+    cache.type = LiteLLMCacheType.VALKEY_SEMANTIC
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "query_string": b"",
+            "headers": [],
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+
+    async def cache_key(identity):
+        data = await add_litellm_data_to_request(
+            data={
+                "model": "test-model",
+                "input": "A private question",
+                "metadata": {"user_api_key": "forged-victim"},
+                "litellm_metadata": {"user_api_key": "forged-victim"},
+            },
+            request=request,
+            user_api_key_dict=UserAPIKeyAuth(api_key=identity),
+            proxy_config=MagicMock(),
+            general_settings={},
+            version="test-version",
+        )
+        return cache.get_cache_key(**data)
+
+    key_a = await cache_key("authenticated-a")
+    assert key_a != await cache_key("authenticated-b")
+    assert key_a == await cache_key("authenticated-a")
+
+
+def test_semantic_cache_keeps_shared_key_end_user_behavior():
+    cache = _semantic_cache()
+    assert cache.get_cache_key(
+        model="test-model", metadata={"user_api_key": "shared-key", "user_api_key_end_user_id": "alice"}
+    ) == cache.get_cache_key(
+        model="test-model", metadata={"user_api_key": "shared-key", "user_api_key_end_user_id": "bob"}
+    )
 
 
 def test_semantic_cache_key_still_separates_models_and_params():
