@@ -792,7 +792,9 @@ class AmazonAnthropicClaudeMessagesConfig(
             and "display" in thinking
             and not AnthropicModelInfo._is_adaptive_thinking_model(model, "bedrock")
         ):
-            anthropic_messages_request["thinking"] = {key: value for key, value in thinking.items() if key != "display"}
+            anthropic_messages_request["thinking"] = {  # mutable-ok: JSON encoding requires a detached dict.
+                key: value for key, value in thinking.items() if key != "display"
+            }
 
         # 7. Final safety net: filter top-level fields to the Bedrock Invoke allowlist.
         # Catches Anthropic-only extensions (output_config, speed, mcp_servers, ...)
