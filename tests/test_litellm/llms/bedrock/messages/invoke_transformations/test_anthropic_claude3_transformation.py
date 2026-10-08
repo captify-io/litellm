@@ -4,6 +4,7 @@ import json
 import os
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Final
 from unittest.mock import Mock
 
 import pytest
@@ -1389,6 +1390,67 @@ def test_bedrock_messages_maps_reasoning_effort_for_adaptive_model(
     assert "reasoning_effort" not in result
     assert result.get("thinking") == {"type": "adaptive", "display": "summarized"}
     assert result.get("output_config") == {"effort": expected_effort}
+
+
+@pytest.mark.usefixtures("local_model_cost_map")
+@pytest.mark.parametrize("display", ["summarized", "omitted", None])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+)
+def test_bedrock_legacy_thinking_display_preserves_budget_and_input(model: str, display: str | None) -> None:
+    from litellm.types.router import GenericLiteLLMParams
+
+    thinking: Final = {"type": "enabled", "budget_tokens": 2048, **({"display": display} if display else {})}
+    original_thinking: Final = copy.deepcopy(thinking)
+    params: Final = {"max_tokens": 4096, "thinking": thinking}
+    messages: Final = [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]
+
+    result: Final = AmazonAnthropicClaudeMessagesConfig().transform_anthropic_messages_request(
+        model=model,
+        messages=messages,
+        anthropic_messages_optional_request_params=params,
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert result["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+    assert result["max_tokens"] == 4096
+    assert result["messages"] == messages
+    assert thinking == original_thinking
+    assert params["thinking"] == original_thinking
+
+
+@pytest.mark.usefixtures("local_model_cost_map")
+@pytest.mark.parametrize(
+    "provider,model,thinking",
+    [
+        ("anthropic", "claude-sonnet-4-5-20250929", {"type": "enabled", "budget_tokens": 2048, "display": "omitted"}),
+        ("bedrock", "anthropic.claude-opus-4-7", {"type": "adaptive", "display": "omitted"}),
+        ("bedrock", "anthropic.claude-sonnet-4-6", {"type": "enabled", "budget_tokens": 2048, "display": "summarized"}),
+    ],
+)
+def test_anthropic_and_adaptive_bedrock_thinking_display_is_preserved(
+    provider: str, model: str, thinking: dict[str, str | int]
+) -> None:
+    from litellm.llms.anthropic.experimental_pass_through.messages.transformation import AnthropicMessagesConfig
+    from litellm.types.router import GenericLiteLLMParams
+
+    config: Final = AnthropicMessagesConfig() if provider == "anthropic" else AmazonAnthropicClaudeMessagesConfig()
+    original_thinking: Final = copy.deepcopy(thinking)
+    result: Final = config.transform_anthropic_messages_request(
+        model=model,
+        messages=[{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+        anthropic_messages_optional_request_params={"max_tokens": 4096, "thinking": thinking},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert result["thinking"] == original_thinking
+    assert thinking == original_thinking
 
 
 def test_bedrock_messages_reasoning_effort_on_non_adaptive_uses_thinking_budget():
