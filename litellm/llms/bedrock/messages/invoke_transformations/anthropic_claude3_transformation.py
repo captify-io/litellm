@@ -790,7 +790,7 @@ class AmazonAnthropicClaudeMessagesConfig(
             isinstance(thinking, dict)
             and thinking.get("type") == "enabled"
             and "display" in thinking
-            and not AnthropicModelInfo._is_adaptive_thinking_model(model, "bedrock")
+            and not AnthropicModelInfo._is_adaptive_thinking_model(model, "bedrock")  # pyright: ignore[reportPrivateUsage]  # Reuse the shared adaptive-model classifier.
         ):
             anthropic_messages_request["thinking"] = {  # mutable-ok: JSON encoding requires a detached dict.
                 key: value for key, value in thinking.items() if key != "display"
