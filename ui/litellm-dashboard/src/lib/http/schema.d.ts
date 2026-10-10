@@ -2050,6 +2050,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/captify/v1/agent-tools-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Agent Tools Access */
+        post: operations["agent_tools_access_captify_v1_agent_tools_access_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/captify/v1/agents": {
         parameters: {
             query?: never;
@@ -36470,6 +36487,27 @@ export interface components {
             /** Total Tokens */
             total_tokens: number;
         };
+        /** ToolAccessRequest */
+        ToolAccessRequest: {
+            /** Actor Id */
+            actor_id: string;
+            /** App Permission Revision */
+            app_permission_revision: string;
+            /** Owner Key Hash */
+            owner_key_hash: string;
+            /** Tenant Id */
+            tenant_id: string;
+        };
+        /** ToolAccessResult */
+        ToolAccessResult: {
+            /** Serverid */
+            serverId: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "admitted" | "unchanged";
+        };
         /** ToolDetailResponse */
         ToolDetailResponse: {
             /** Overrides */
@@ -41839,6 +41877,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentAuthoringCapabilities"];
+                };
+            };
+        };
+    };
+    agent_tools_access_captify_v1_agent_tools_access_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolAccessRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolAccessResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

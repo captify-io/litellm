@@ -88,6 +88,7 @@ LAZY_FEATURES: Final[tuple[LazyFeature, ...]] = (
             "/agent/",
             "/captify/v1/agents",
             "/captify/v1/agent-authoring-capabilities",
+            "/captify/v1/agent-tools-access",
         ),
     ),
     LazyFeature(

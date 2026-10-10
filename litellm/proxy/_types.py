@@ -534,6 +534,7 @@ class LiteLLMRoutes(enum.Enum):
         "/captify/v1/agents",
         "/captify/v1/agents/{agent_id}",
         "/captify/v1/agent-authoring-capabilities",
+        "/captify/v1/agent-tools-access",
         "/v1/agents",
         "/v1/agents/{agent_id}",
         "/v1/agents/make_public",

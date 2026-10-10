@@ -1122,3 +1122,12 @@ def _install_owned_authoring_routes() -> None:
 
 
 _install_owned_authoring_routes()
+
+
+def _install_tool_access_routes() -> None:
+    from litellm.proxy.agent_endpoints.tool_access import router as tool_access_router
+
+    router.include_router(tool_access_router)
+
+
+_install_tool_access_routes()
