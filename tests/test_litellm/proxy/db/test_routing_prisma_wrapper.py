@@ -2,10 +2,103 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Dict
+import urllib.parse
+from typing import Any, Dict, Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+@pytest.mark.parametrize("auth_flag", ["IAM_TOKEN_DB_AUTH", "AZURE_POSTGRESQL_AUTH"])
+def test_reader_initial_token_preserves_tls_and_pool_settings(
+    monkeypatch: pytest.MonkeyPatch, auth_flag: str
+) -> None:
+    from litellm.proxy.db.routing_prisma_wrapper import RoutingPrismaWrapper
+    from litellm.proxy.utils import PrismaClient
+
+    reader_url: Final = (
+        "postgresql://reader_user:OLD_TOKEN@reader.example.test:5432/reader_db"
+        "?sslmode=require&sslaccept=strict&sslcert=%2Fcerts%2Freader%20ca.pem"
+        "&connection_limit=7&pool_timeout=30&schema=reader_schema&options=one&options=two&application_name="
+    )
+    writer_url: Final = "postgresql://writer:WRITER_TOKEN@writer.example.test/db?sslcert=writer.pem"
+    monkeypatch.setenv("IAM_TOKEN_DB_AUTH", str(auth_flag == "IAM_TOKEN_DB_AUTH"))
+    monkeypatch.setenv("AZURE_POSTGRESQL_AUTH", str(auth_flag == "AZURE_POSTGRESQL_AUTH"))
+    monkeypatch.setenv("AWS_REGION_NAME", "us-gov-west-1")
+    monkeypatch.setenv("DATABASE_URL", writer_url)
+    monkeypatch.setenv("DATABASE_URL_READ_REPLICA", reader_url)
+    prisma_module: Final = MagicMock()
+    monkeypatch.setitem(sys.modules, "prisma", prisma_module)
+
+    with (
+        patch("boto3.client") as rds,
+        patch("azure.identity.get_bearer_token_provider", return_value=lambda: "FRESH/TOKEN") as azure,
+    ):
+        rds.return_value.generate_db_auth_token.return_value = "FRESH/TOKEN"
+        client: Final = PrismaClient(database_url=writer_url, proxy_logging_obj=MagicMock())
+
+    assert isinstance(client.db, RoutingPrismaWrapper)
+    assert prisma_module.Prisma.call_count == 2
+    minted_url: Final = prisma_module.Prisma.call_args.kwargs["datasource"]["url"]
+    parsed: Final = urllib.parse.urlsplit(minted_url)
+    assert parsed.hostname == "reader.example.test"
+    assert parsed.username == "reader_user"
+    assert parsed.password == "FRESH%2FTOKEN"
+    assert parsed.path == "/reader_db"
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == urllib.parse.parse_qs(
+        urllib.parse.urlsplit(reader_url).query, keep_blank_values=True
+    )
+    assert os.environ["DATABASE_URL_READ_REPLICA"] == minted_url
+    assert os.environ["DATABASE_URL"] == writer_url
+    if auth_flag == "IAM_TOKEN_DB_AUTH":
+        rds.return_value.generate_db_auth_token.assert_called_once_with(
+            DBHostname="reader.example.test", Port="5432", DBUsername="reader_user"
+        )
+        azure.assert_not_called()
+    else:
+        azure.assert_called_once()
+        rds.assert_not_called()
+
+
+@pytest.mark.parametrize("reader", [False, True])
+def test_token_refresh_preserves_own_tls_and_pool_options(monkeypatch, reader):
+    from litellm.proxy.db.prisma_client import PrismaWrapper
+    from litellm.proxy.db.token_auth import AzureEntraTokenAuth, parse_iam_endpoint_from_url
+
+    host = "reader.example.com" if reader else "writer.example.com"
+    env_var = "DATABASE_URL_READ_REPLICA" if reader else "DATABASE_URL"
+    original = (
+        f"postgresql://litellm:OLD_TOKEN@{host}:5432/litellm_db"
+        "?sslmode=require&sslaccept=strict&sslcert=%2Fcerts%2Froot%20ca.pem"
+        "&connection_limit=7&pool_timeout=30&schema=current_schema&options="
+    )
+    monkeypatch.setenv(env_var, original)
+    monkeypatch.setenv("DATABASE_HOST", "writer.example.com")
+    monkeypatch.setenv("DATABASE_USER", "litellm")
+    monkeypatch.setenv("DATABASE_NAME", "litellm_db")
+    monkeypatch.setenv("DATABASE_SCHEMA", "current_schema")
+    if reader:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://writer:secret@writer.example.com/db?sslcert=wrong.pem")
+    tokens = iter(("FIRST_TOKEN", "SECOND_TOKEN"))
+    wrapper = PrismaWrapper(
+        original_prisma=MagicMock(),
+        token_auth=AzureEntraTokenAuth(token_provider=lambda: next(tokens)),
+        db_url_env_var=env_var,
+        iam_endpoint=parse_iam_endpoint_from_url(original) if reader else None,
+    )
+
+    for token in ("FIRST_TOKEN", "SECOND_TOKEN"):
+        result = wrapper.get_rds_iam_token()
+        assert result is not None
+        parsed = urllib.parse.urlsplit(result)
+        assert parsed.password == token
+        assert parsed.hostname == host
+        assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == urllib.parse.parse_qs(
+            urllib.parse.urlsplit(original).query, keep_blank_values=True
+        )
+        assert os.environ[env_var] == result
+    if reader:
+        assert os.environ["DATABASE_URL"] == "postgresql://writer:secret@writer.example.com/db?sslcert=wrong.pem"
 
 
 

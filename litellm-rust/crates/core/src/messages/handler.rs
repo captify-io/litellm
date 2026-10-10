@@ -8,7 +8,8 @@ use super::types::{AnthropicMessagesResponse, ProviderMessagesRequest};
 pub(super) async fn execute_messages_provider_call(
     request: ProviderMessagesRequest,
 ) -> CoreResult<AnthropicMessagesResponse> {
-    let mut request_builder = http_client().post(&request.url).json(&request.body);
+    let url = crate::http_utils::provider_url(&request.url)?;
+    let mut request_builder = http_client(&url)?.post(url).json(&request.body);
     for (key, value) in &request.upstream_headers {
         request_builder = request_builder.header(key, value);
     }
@@ -49,7 +50,8 @@ pub(super) async fn execute_messages_provider_stream(
         ));
     }
 
-    let mut request_builder = http_client().post(&request.url).json(&request.body);
+    let url = crate::http_utils::provider_url(&request.url)?;
+    let mut request_builder = http_client(&url)?.post(url).json(&request.body);
     for (key, value) in &request.upstream_headers {
         request_builder = request_builder.header(key, value);
     }

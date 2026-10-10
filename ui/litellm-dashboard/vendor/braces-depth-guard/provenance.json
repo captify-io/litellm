@@ -1,0 +1,56 @@
+{
+  "files": [
+    {
+      "afterSha256": "88cf20f18b59c9b2741c2d9b0f0ac6b2967d8e174667edf817133ca57d76809e",
+      "beforeSha256": "dc98f22eee3d511785d92a00758d5f0d48efed5f5813bdecc2de430c529b5c9f",
+      "path": "lib/compile.js"
+    },
+    {
+      "afterSha256": "8d0bfdb50bb1e5267facef720ba09179634761165e3d6e13ad512ed10d6c180c",
+      "beforeSha256": "c18ac5adb57308f1ce42a28552da3a31f5d83709743ebd9a636336813a744d4b",
+      "path": "lib/constants.js"
+    },
+    {
+      "afterSha256": "46a259d3f23c0cd441fa370f16d5d48fa71060dfe918eeba84f6e95d3a94d368",
+      "beforeSha256": "41ccc196ebfa7b7781a634e721eb744e4e7bcb54cba427a7e3d6806a1b9e58f7",
+      "path": "lib/expand.js"
+    },
+    {
+      "afterSha256": "adf3c108a16afaabe5379298d2227881e88f536cc7345b7df780a80d38dd01f9",
+      "beforeSha256": "e572166565f15fa6ad9865ae49d678218e32aabfd1b3720f6d0d43d39800d310",
+      "path": "lib/parse.js"
+    },
+    {
+      "afterSha256": "a3b8b5e7567ff9bfdbe155479fbdd92d5a924c3919adf05316f8f0c4f6330332",
+      "beforeSha256": "379f22d77bfa1478341ccd49c5e4267464aabcbba03558bab332aac23fc6f23a",
+      "path": "lib/stringify.js"
+    },
+    {
+      "afterSha256": "bbdfdad69da36c1994a19006af254659586a20d2c00b2a936926b7905cfb3aaf",
+      "beforeSha256": "b5a7596aa67730412b3c029ef09e84e6b67b8e445cffd35d1d295549c89066c7",
+      "path": "lib/utils.js"
+    }
+  ],
+  "patch": {
+    "advisory": "GHSA-vfj7-8cjw-p6xm",
+    "cve": "CVE-2026-93687",
+    "scope": "Mandatory parser and recursive nodes traversal depth limit; not general malformed AST graph/resource safety",
+    "sha256": "835c1ea51eed7cabeabf2bcdd922cd828f2556305734eb54f7ef3b11c40e7728",
+    "source": "https://github.com/micromatch/braces/pull/78",
+    "sourceCommit": "97308a01d091b211cf015314a2d0696da28a5392"
+  },
+  "status": "DOWNSTREAM_SOURCE_DERIVATION_NOT_UPSTREAM_RELEASE",
+  "upstream": {
+    "gitCommit": "74b2db2938fad48a2ea54a9c8bf27a37a62c350d",
+    "license": "MIT",
+    "name": "braces",
+    "npmIntegrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==",
+    "version": "3.0.3",
+    "sha256": "1cd18e862c8640b4568b1425a7df4ee030ff201d45b2da8f9f222d2987494ffc",
+    "tarball": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz"
+  },
+  "downstream": {
+    "name": "@captify-io/braces-depth-guard",
+    "version": "3.0.3-captify.1"
+  }
+}

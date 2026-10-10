@@ -79,8 +79,11 @@ jobs:
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@1c8ae4843586d3ba879736b7f6b7b0c990757fab # v4.12.1
+        env:
+          CODSPEED_SKIP_UPLOAD: ${{ vars.CODSPEED_UPLOAD_ENABLED == 'false' }}
         with:
           mode: simulation
+          runner-version: "4.12.1"
           run: >
             env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
             uv run --frozen --no-default-groups
@@ -92,3 +95,12 @@ jobs:
             -p pytest_codspeed.plugin
             tests/benchmarks/
             --codspeed
+            --junitxml=benchmark-results.xml
+
+      - name: Preserve benchmark results
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: benchmark-results
+          path: benchmark-results.xml
+          if-no-files-found: error

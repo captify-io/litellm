@@ -42,7 +42,7 @@ async def test_jwt_to_virtual_key_mapping_resolution():
         virtual_key_claim_field="email", virtual_key_mapping_cache_ttl=3600
     )
 
-    jwt_claims = {"email": "user@example.com", "sub": "123"}
+    jwt_claims = {"email": "user@example.com", "email_verified": True, "sub": "123"}
 
     prisma_client = MagicMock()
     prisma_client.db.litellm_jwtkeymapping.find_first = AsyncMock()
@@ -98,7 +98,7 @@ async def test_jwt_to_virtual_key_mapping_no_mapping():
     """
     jwt_handler = JWTHandler()
     jwt_handler.litellm_jwtauth = LiteLLM_JWTAuth(virtual_key_claim_field="email")
-    jwt_claims = {"email": "unknown@example.com"}
+    jwt_claims = {"email": "unknown@example.com", "email_verified": True}
 
     prisma_client = MagicMock()
     prisma_client.db.litellm_jwtkeymapping.find_first = AsyncMock()
@@ -503,7 +503,7 @@ async def test_reject_behavior_raises_403_on_no_mapping():
         virtual_key_claim_field="email",
         unregistered_jwt_client_behavior=UnregisteredJWTClientBehavior.REJECT,
     )
-    jwt_claims = {"email": "unknown@example.com"}
+    jwt_claims = {"email": "unknown@example.com", "email_verified": True}
 
     prisma_client = MagicMock()
     prisma_client.db.litellm_jwtkeymapping.find_first = AsyncMock(return_value=None)
@@ -542,7 +542,7 @@ async def test_reject_behavior_caches_sentinel_after_db_miss():
         unregistered_jwt_client_behavior=UnregisteredJWTClientBehavior.REJECT,
         virtual_key_mapping_cache_ttl=300,
     )
-    jwt_claims = {"email": "unknown@example.com"}
+    jwt_claims = {"email": "unknown@example.com", "email_verified": True}
 
     prisma_client = MagicMock()
     prisma_client.db.litellm_jwtkeymapping.find_first = AsyncMock(return_value=None)
@@ -599,7 +599,7 @@ async def test_reject_behavior_raises_403_on_cached_no_mapping():
         virtual_key_claim_field="email",
         unregistered_jwt_client_behavior=UnregisteredJWTClientBehavior.REJECT,
     )
-    jwt_claims = {"email": "unknown@example.com"}
+    jwt_claims = {"email": "unknown@example.com", "email_verified": True}
 
     prisma_client = MagicMock()
     prisma_client.db.litellm_jwtkeymapping.find_first = AsyncMock(return_value=None)
@@ -624,6 +624,7 @@ async def test_reject_behavior_raises_403_on_cached_no_mapping():
             )
         assert exc_info.value.status_code == 403
         # DB must NOT have been hit (sentinel served from cache)
+        assert "unknown@example.com" in exc_info.value.detail
         prisma_client.db.litellm_jwtkeymapping.find_first.assert_not_called()
 
 
@@ -761,7 +762,7 @@ async def test_auto_register_returns_pending_signal_on_stale_no_mapping_sentinel
         unregistered_jwt_client_behavior=UnregisteredJWTClientBehavior.AUTO_REGISTER,
         virtual_key_mapping_cache_ttl=300,
     )
-    jwt_claims = {"email": "alice@corp.com"}
+    jwt_claims = {"email": "alice@corp.com", "email_verified": True}
 
     prisma_client = MagicMock()
     prisma_client.db.litellm_jwtkeymapping.find_first = AsyncMock(return_value=None)
@@ -887,7 +888,7 @@ async def test_reject_behavior_enforced_when_prisma_client_is_none():
         virtual_key_claim_field="email",
         unregistered_jwt_client_behavior=UnregisteredJWTClientBehavior.REJECT,
     )
-    jwt_claims = {"email": "unknown@example.com"}
+    jwt_claims = {"email": "unknown@example.com", "email_verified": True}
 
     user_api_key_cache = DualCache()
 
@@ -1006,7 +1007,7 @@ async def test_fallback_team_mapping_returns_none_when_prisma_client_is_none():
         virtual_key_claim_field="email",
         unregistered_jwt_client_behavior=UnregisteredJWTClientBehavior.FALLBACK_TEAM_MAPPING,
     )
-    jwt_claims = {"email": "anyone@example.com"}
+    jwt_claims = {"email": "anyone@example.com", "email_verified": True}
 
     result = await _resolve_jwt_to_virtual_key(
         jwt_claims=jwt_claims,

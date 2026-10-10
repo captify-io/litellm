@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Annotated, Final, TypedDict, assert_never
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from typing_extensions import ReadOnly, Required
 
 import litellm
@@ -26,7 +26,6 @@ from litellm.proxy._types import (
     CommonProxyErrors,
     LitellmUserRoles,
     UserAPIKeyAuth,
-    user_api_key_has_admin_view,
 )
 from litellm.proxy.a2a.agent_card import (
     SUPPORTED_A2A_PROTOCOL_VERSIONS,
@@ -522,76 +521,12 @@ async def create_agent(
 )
 async def get_agent_by_id(
     agent_id: str,
+    response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
-    """
-    Get a specific agent by ID
+    from litellm.proxy.agent_endpoints.owned_authoring import read_agent_record
 
-    Example Request:
-    ```bash
-    curl -X GET "http://localhost:4000/v1/agents/123e4567-e89b-12d3-a456-426614174000" \\
-        -H "Authorization: Bearer <your_api_key>"
-    ```
-    """
-    await check_feature_access_for_user(user_api_key_dict, "agents")
-
-    if not user_api_key_has_admin_view(user_api_key_dict):
-        from litellm.proxy.agent_endpoints.auth.agent_permission_handler import (
-            AgentRequestHandler,
-        )
-
-        is_allowed = await AgentRequestHandler.is_agent_allowed(agent_id=agent_id, user_api_key_auth=user_api_key_dict)
-        if not is_allowed:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Agent '{agent_id}' is not allowed for your key/team. Contact proxy admin for access.",
-            )
-
-    from litellm.proxy.proxy_server import prisma_client
-
-    if prisma_client is None:
-        raise HTTPException(status_code=500, detail="Prisma client not initialized")
-
-    try:
-        agent = AGENT_REGISTRY.get_agent_by_id(agent_id=agent_id)
-        if agent is None:
-            agent_row: Final = await agents_table(prisma_client).find_unique(
-                where={"agent_id": agent_id},
-                include={"object_permission": True},
-            )
-            if agent_row is not None:
-                agent_dict: Final = agent_row.model_dump()
-                if agent_row.object_permission is not None:
-                    try:
-                        agent_dict["object_permission"] = agent_row.object_permission.model_dump()
-                    except Exception:
-                        agent_dict["object_permission"] = agent_row.object_permission.dict()
-                agent = AgentResponse(**agent_dict)
-        else:
-            # Agent found in memory — refresh spend from DB
-            db_row: Final = await agents_table(prisma_client).find_unique(where={"agent_id": agent_id})
-            if db_row is not None:
-                agent.spend = db_row.spend
-
-        if agent is None:
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
-
-        await _attach_keys_to_agents([agent], prisma_client)
-
-        # Redact sensitive fields for non-admin users
-        is_admin = (
-            user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN
-            or user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN.value
-        )
-        if not is_admin:
-            agent = _redact_sensitive_agent_fields([agent])[0]
-
-        return agent
-    except HTTPException:
-        raise
-    except Exception as e:
-        verbose_proxy_logger.exception("Error getting agent from db: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    return await read_agent_record(agent_id, response, user_api_key_dict)
 
 
 @router.put(
@@ -1178,3 +1113,21 @@ async def get_agent_daily_activity(
         page=page,
         page_size=page_size,
     )
+
+
+def _install_owned_authoring_routes() -> None:
+    from litellm.proxy.agent_endpoints.owned_authoring import router as owned_authoring_router
+
+    router.include_router(owned_authoring_router)
+
+
+_install_owned_authoring_routes()
+
+
+def _install_tool_access_routes() -> None:
+    from litellm.proxy.agent_endpoints.tool_access import router as tool_access_router
+
+    router.include_router(tool_access_router)
+
+
+_install_tool_access_routes()

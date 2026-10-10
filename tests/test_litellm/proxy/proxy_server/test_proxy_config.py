@@ -12,7 +12,7 @@ import json
 import os
 import re
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, Final
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -2934,6 +2934,26 @@ def test_ProxyConfig__update_config_fields_merges_dict():
         db_param_value={"b": 3, "c": 4, "d": 5},
     )
     assert out == {"general_settings": {"a": 1, "b": 3, "c": 4, "d": 5}}
+
+
+def test_persisted_stream_cost_setting_updates_the_serving_worker() -> None:
+    config: Final = ProxyConfig()
+    previous: Final = litellm.include_cost_in_streaming_usage
+    try:
+        for enabled in (False, True, False):
+            updated: Final = config._update_config_fields(
+                current_config={"litellm_settings": {"drop_params": True}},
+                param_name="litellm_settings",
+                db_param_value={"include_cost_in_streaming_usage": enabled},
+            )
+            assert litellm.include_cost_in_streaming_usage is enabled
+            assert updated["litellm_settings"]["drop_params"] is True
+    finally:
+        config._update_config_fields(
+            current_config={},
+            param_name="litellm_settings",
+            db_param_value={"include_cost_in_streaming_usage": previous},
+        )
 
 
 def test_ProxyConfig__update_config_fields_invalid_param_raises():

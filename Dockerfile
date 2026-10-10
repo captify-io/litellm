@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
 # Base image for building
-ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:7e62cecd3c5712dba6e52c5260afb8f9d7a23b9bbcdd26ad7508a811e74b766d
+ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
 
 # Runtime image
-ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:7e62cecd3c5712dba6e52c5260afb8f9d7a23b9bbcdd26ad7508a811e74b766d
+ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
 # Pinned by digest like the other base images; bump explicitly on Node upgrades.
 ARG UI_BUILD_IMAGE=node:24.19-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
@@ -22,7 +22,10 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 
 WORKDIR /ui
 
+RUN apk add --no-cache patch
+
 COPY ui/litellm-dashboard/package.json ui/litellm-dashboard/package-lock.json ./
+COPY ui/litellm-dashboard/vendor/ ./vendor/
 RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline
 
 COPY ui/litellm-dashboard/ ./
@@ -39,6 +42,8 @@ COPY --from=uvbin /uvx /usr/local/bin/uvx
 
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
+    libcrypto3=3.6.5-r1 \
+    libssl3=3.6.5-r1 \
     bash \
     gcc \
     python3 \
@@ -104,7 +109,9 @@ USER root
 
 # node (without npm) is required by the prisma CLI at runtime
 RUN apk upgrade --no-cache && \
-    apk add --no-cache bash openssl tzdata nodejs python3 libsndfile
+    apk add --no-cache bash openssl tzdata nodejs python3 libsndfile \
+    libcrypto3=3.6.5-r1 libssl3=3.6.5-r1 \
+    "zlib>=1.3.2.1_rc20260601-r0"
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:${PATH}" \

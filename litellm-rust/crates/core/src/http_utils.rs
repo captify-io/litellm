@@ -5,6 +5,30 @@ use serde_json::{Map, Value};
 use crate::constants::UPSTREAM_ERROR_BODY_MAX_CHARS;
 use crate::error::{CoreError, CoreResult, json_type_name};
 
+/// Credential-bearing provider calls use HTTPS outside the current host.
+/// Literal loopback HTTP supports local adapters; redirects must remain disabled.
+pub fn provider_url(value: &str) -> CoreResult<reqwest::Url> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| CoreError::InvalidRequest("invalid provider URL".to_string()))?;
+    let loopback = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| address.is_loopback());
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || (url.scheme() != "https" && !(url.scheme() == "http" && loopback))
+    {
+        return Err(CoreError::InvalidRequest(
+            "provider transport requires HTTPS outside literal loopback".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
 /// Bound an upstream error body before it crosses a host boundary, so provider
 /// bodies stay data-minimized.
 pub fn truncate_error_body(body: &str) -> String {
@@ -58,6 +82,32 @@ pub fn has_bearer_auth(headers: &[(String, String)]) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn credential_transport_rejects_remote_cleartext_and_embedded_credentials() {
+        for url in [
+            "http://example.com/v1/messages",
+            "http://10.2.3.4/v1/messages",
+            "http://localhost.evil.invalid/",
+            "ftp://127.0.0.1/",
+            "https://user:password@example.com/",
+        ] {
+            assert!(
+                provider_url(url).is_err(),
+                "unsafe provider transport accepted"
+            );
+        }
+        for url in [
+            "https://api.anthropic.com/v1/messages",
+            "http://127.0.0.1:4000/",
+            "http://[::1]:4000/",
+        ] {
+            assert!(
+                provider_url(url).is_ok(),
+                "supported provider transport refused"
+            );
+        }
+    }
 
     #[test]
     fn truncate_leaves_short_bodies_untouched() {

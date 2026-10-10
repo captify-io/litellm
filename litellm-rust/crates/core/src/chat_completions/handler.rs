@@ -19,7 +19,8 @@ pub(super) async fn execute_chat_completions_provider_call(
     })?;
     let headers = signed_headers(&request, &body).await?;
 
-    let mut request_builder = http_client().post(&request.url).body(body);
+    let url = crate::http_utils::provider_url(&request.url)?;
+    let mut request_builder = http_client(&url)?.post(url).body(body);
     for (key, value) in &headers {
         request_builder = request_builder.header(key, value);
     }

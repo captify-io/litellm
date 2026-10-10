@@ -616,7 +616,7 @@ document.getElementById("connect-btn").addEventListener("click", () => {
   STATE.pollMs    = parseInt(document.getElementById("poll-ms").value, 10) || 500;
   STATE.avgTokens = parseInt(document.getElementById("avg-tokens").value, 10) || 500;
   ssSet("ar_proxy_url", STATE.proxyUrl);
-  ssSet("ar_api_key",   STATE.apiKey);
+
   startPolling();
 });
 
@@ -627,7 +627,7 @@ document.getElementById("router-select").addEventListener("change", (e) => {
 
 window.addEventListener("DOMContentLoaded", () => {
   const u = ssGet("ar_proxy_url"); if (u) document.getElementById("proxy-url").value = u;
-  const k = ssGet("ar_api_key");   if (k) document.getElementById("api-key").value   = k;
+  try { sessionStorage.removeItem("ar_api_key"); } catch {}
 });
 </script>
 

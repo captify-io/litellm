@@ -22,7 +22,22 @@ const URL_RULE_PATTERN = new RegExp(
   "i",
 );
 
-const isUrl = (value: string): boolean => value.length <= 2048 && URL_RULE_PATTERN.test(value);
+export function safePluginUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    const webProtocol = url.protocol === "https:" || url.protocol === "http:";
+    const withoutCredentials = !url.username && !url.password;
+    if (webProtocol && withoutCredentials) {
+      return url.href;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+const isUrl = (value: string): boolean =>
+  value.length <= 2048 && URL_RULE_PATTERN.test(value) && safePluginUrl(value) !== undefined;
 
 const pluginShape = {
   name: z.string().min(1, "Required"),

@@ -475,7 +475,7 @@ const STATE = {
 
 // ---- session ---------------------------------------------------------
 function newSession() {
-  STATE.sessionId = "chat-" + Math.random().toString(36).slice(2, 10);
+  STATE.sessionId = "chat-" + Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
   STATE.messages = [];
   STATE.msgCount = 0;
   STATE.lastModel = null;
@@ -765,7 +765,7 @@ function connect() {
   STATE.connected  = true;
 
   ssSet("ar_proxy_url", url);
-  ssSet("ar_api_key",   key);
+
   ssSet("ar_router",    router);
 
   setConn(true);
@@ -827,7 +827,7 @@ document.querySelectorAll(".sc-btn[data-id]").forEach(btn => {
 // ---- restore session storage -----------------------------------------
 window.addEventListener("DOMContentLoaded", () => {
   const u = ssGet("ar_proxy_url"); if (u) document.getElementById("proxy-url").value = u;
-  const k = ssGet("ar_api_key");   if (k) document.getElementById("api-key").value   = k;
+  try { sessionStorage.removeItem("ar_api_key"); } catch {}
   const r = ssGet("ar_router");    if (r) document.getElementById("router").value     = r;
   newSession();
   renderInfo();

@@ -2033,6 +2033,43 @@
           "title": "APIKeySecurityScheme",
           "type": "object"
         },
+        "AgentAuthoringCapabilities": {
+          "additionalProperties": false,
+          "properties": {
+            "authoritativeRead": {
+              "const": true,
+              "default": true,
+              "title": "Authoritativeread",
+              "type": "boolean"
+            },
+            "conditionalUpdate": {
+              "const": true,
+              "default": true,
+              "title": "Conditionalupdate",
+              "type": "boolean"
+            },
+            "ownedCreate": {
+              "const": true,
+              "default": true,
+              "title": "Ownedcreate",
+              "type": "boolean"
+            },
+            "schemaVersion": {
+              "const": 1,
+              "default": 1,
+              "title": "Schemaversion",
+              "type": "integer"
+            },
+            "versionHeader": {
+              "const": "X-Captify-Agent-Version",
+              "default": "X-Captify-Agent-Version",
+              "title": "Versionheader",
+              "type": "string"
+            }
+          },
+          "title": "AgentAuthoringCapabilities",
+          "type": "object"
+        },
         "AgentCapabilities": {
           "description": "Defines optional capabilities supported by an agent.",
           "properties": {
@@ -2955,6 +2992,29 @@
           "title": "BreakdownMetrics",
           "type": "object"
         },
+        "ConditionalAgentPatch": {
+          "additionalProperties": false,
+          "properties": {
+            "expected_version": {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "title": "Expected Version",
+              "type": "string"
+            },
+            "patch": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "title": "Patch",
+              "type": "object"
+            }
+          },
+          "required": [
+            "expected_version",
+            "patch"
+          ],
+          "title": "ConditionalAgentPatch",
+          "type": "object"
+        },
         "DailySpendData": {
           "properties": {
             "breakdown": {
@@ -3127,6 +3187,7 @@
           "title": "HTTPValidationError",
           "type": "object"
         },
+        "JsonValue": {},
         "KeyMetadata": {
           "description": "Metadata for a key",
           "properties": {
@@ -3365,6 +3426,51 @@
           "title": "OpenIdConnectSecurityScheme",
           "type": "object"
         },
+        "OwnedAgentCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Actor Id",
+              "type": "string"
+            },
+            "agent_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "owner_key_hash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Owner Key Hash",
+              "type": "string"
+            },
+            "record": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "title": "Record",
+              "type": "object"
+            },
+            "tenant_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent_id",
+            "actor_id",
+            "tenant_id",
+            "owner_key_hash",
+            "record"
+          ],
+          "title": "OwnedAgentCreate",
+          "type": "object"
+        },
         "PatchAgentRequest": {
           "properties": {
             "agent_card_params": {
@@ -3556,6 +3662,65 @@
             }
           },
           "title": "SpendMetrics",
+          "type": "object"
+        },
+        "ToolAccessRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Actor Id",
+              "type": "string"
+            },
+            "app_permission_revision": {
+              "maxLength": 512,
+              "minLength": 1,
+              "title": "App Permission Revision",
+              "type": "string"
+            },
+            "owner_key_hash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Owner Key Hash",
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "actor_id",
+            "tenant_id",
+            "owner_key_hash",
+            "app_permission_revision"
+          ],
+          "title": "ToolAccessRequest",
+          "type": "object"
+        },
+        "ToolAccessResult": {
+          "additionalProperties": false,
+          "properties": {
+            "serverId": {
+              "title": "Serverid",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "admitted",
+                "unchanged"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "serverId"
+          ],
+          "title": "ToolAccessResult",
           "type": "object"
         },
         "ValidationError": {
@@ -3751,6 +3916,181 @@
             }
           ],
           "summary": "Get Agent Daily Activity",
+          "tags": [
+            "agents"
+          ]
+        }
+      },
+      "/captify/v1/agent-authoring-capabilities": {
+        "get": {
+          "operationId": "agent_authoring_capabilities_captify_v1_agent_authoring_capabilities_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentAuthoringCapabilities"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "security": [
+            {
+              "APIKeyHeader": []
+            }
+          ],
+          "summary": "Agent Authoring Capabilities",
+          "tags": [
+            "agents"
+          ]
+        }
+      },
+      "/captify/v1/agent-tools-access": {
+        "post": {
+          "operationId": "agent_tools_access_captify_v1_agent_tools_access_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolAccessRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ToolAccessResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "security": [
+            {
+              "APIKeyHeader": []
+            }
+          ],
+          "summary": "Agent Tools Access",
+          "tags": [
+            "agents"
+          ]
+        }
+      },
+      "/captify/v1/agents": {
+        "post": {
+          "operationId": "create_owned_agent_captify_v1_agents_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedAgentCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "security": [
+            {
+              "APIKeyHeader": []
+            }
+          ],
+          "summary": "Create Owned Agent",
+          "tags": [
+            "agents"
+          ]
+        }
+      },
+      "/captify/v1/agents/{agent_id}": {
+        "patch": {
+          "operationId": "patch_agent_conditionally_captify_v1_agents__agent_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "agent_id",
+              "required": true,
+              "schema": {
+                "title": "Agent Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConditionalAgentPatch"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "security": [
+            {
+              "APIKeyHeader": []
+            }
+          ],
+          "summary": "Patch Agent Conditionally",
           "tags": [
             "agents"
           ]
@@ -3982,7 +4322,6 @@
           ]
         },
         "get": {
-          "description": "Get a specific agent by ID\n\nExample Request:\n```bash\ncurl -X GET \"http://localhost:4000/v1/agents/123e4567-e89b-12d3-a456-426614174000\" \\\n    -H \"Authorization: Bearer <your_api_key>\"\n```",
           "operationId": "get_agent_by_id_v1_agents__agent_id__get",
           "parameters": [
             {

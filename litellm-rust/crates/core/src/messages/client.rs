@@ -3,13 +3,26 @@ use std::time::Duration;
 
 use crate::constants::{MESSAGES_CONNECT_TIMEOUT_SECS, MESSAGES_TIMEOUT_SECS};
 
-pub(super) fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(MESSAGES_TIMEOUT_SECS))
-            .connect_timeout(Duration::from_secs(MESSAGES_CONNECT_TIMEOUT_SECS))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+use crate::error::{CoreError, CoreResult};
+
+pub(super) fn http_client(url: &reqwest::Url) -> CoreResult<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
+    static LOOPBACK_CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
+    let https_only = url.scheme() == "https";
+    let client = if https_only {
+        &CLIENT
+    } else {
+        &LOOPBACK_CLIENT
+    };
+    client
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .https_only(https_only)
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(MESSAGES_TIMEOUT_SECS))
+                .connect_timeout(Duration::from_secs(MESSAGES_CONNECT_TIMEOUT_SECS))
+                .build()
+        })
+        .as_ref()
+        .map_err(|_| CoreError::Network("provider HTTP client initialization failed".to_string()))
 }

@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useEffect, useMemo, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import ChatImageUpload from "../chat_ui/ChatImageUpload";
-import { createChatDisplayMessage, createChatMultimodalMessage } from "../chat_ui/ChatImageUtils";
+import { createChatDisplayMessage, createChatMultimodalMessage, safeBlobPreviewUrl } from "../chat_ui/ChatImageUtils";
 import type { TokenUsage } from "@/components/chat_ui/ResponseMetrics";
 import type { MessageType, VectorStoreSearchResponse } from "@/components/chat_ui/types";
 import { makeOpenAIChatCompletionRequest } from "@/components/llm_calls/chat_completion";
@@ -824,7 +824,7 @@ export default function CompareUI({ accessToken, disabledPersonalKeyCreation }: 
                         </div>
                       ) : (
                         <img
-                          src={uploadedFilePreviewUrl || ""}
+                          src={safeBlobPreviewUrl(uploadedFilePreviewUrl)}
                           alt="Upload preview"
                           className="w-10 h-10 rounded-md border border-border object-cover"
                         />

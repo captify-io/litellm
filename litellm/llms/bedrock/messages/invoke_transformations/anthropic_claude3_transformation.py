@@ -785,6 +785,17 @@ class AmazonAnthropicClaudeMessagesConfig(
             )
             anthropic_messages_request.pop("output_config", None)
 
+        thinking: Final = anthropic_messages_request.get("thinking")
+        if (
+            isinstance(thinking, dict)
+            and thinking.get("type") == "enabled"
+            and "display" in thinking
+            and not AnthropicModelInfo._is_adaptive_thinking_model(model, "bedrock")  # pyright: ignore[reportPrivateUsage]  # Reuse the shared adaptive-model classifier.
+        ):
+            anthropic_messages_request["thinking"] = {  # mutable-ok: JSON encoding requires a detached dict.
+                key: value for key, value in thinking.items() if key != "display"
+            }
+
         # 7. Final safety net: filter top-level fields to the Bedrock Invoke allowlist.
         # Catches Anthropic-only extensions (output_config, speed, mcp_servers, ...)
         # and any future additions Claude Code may start sending. ``context_management``

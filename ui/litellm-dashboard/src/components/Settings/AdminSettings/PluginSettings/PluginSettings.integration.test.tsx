@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import PluginSettings from "./PluginSettings";
+import { pluginSchema } from "./schema";
 
 const { getConfigFieldSettingMock, updateConfigFieldSettingMock } = vi.hoisted(() => ({
   getConfigFieldSettingMock: vi.fn(),
@@ -131,4 +132,16 @@ describe("PluginSettings plugin key reveal (post-migration shadcn affordance)", 
     expect(keyInput).toHaveAttribute("type", "password");
     expect(screen.queryByRole("button", { name: "Hide plugin key" })).not.toBeInTheDocument();
   });
+});
+
+describe("PluginSettings untrusted links", () => {
+  it.each(["javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "https://user:password@example.com/"])(
+    "keeps %s inert in stored settings and refuses saving it",
+    async (url) => {
+      getConfigFieldSettingMock.mockResolvedValue({ field_value: [{ ...REDACTED_PLUGIN, url }] });
+      render(<PluginSettings />);
+      expect(await screen.findByText(url)).not.toHaveAttribute("href");
+      expect(pluginSchema.safeParse({ ...REDACTED_PLUGIN, url }).success).toBe(false);
+    },
+  );
 });

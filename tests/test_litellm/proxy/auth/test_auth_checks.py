@@ -919,7 +919,7 @@ async def test_get_user_object_upsert_includes_user_email():
 
     # Setup the mock returns - user does not exist
     mock_prisma_client.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
-    mock_prisma_client.db.litellm_usertable.find_first = AsyncMock(return_value=None)
+    mock_prisma_client.db.litellm_usertable.find_many = AsyncMock(return_value=[])
     mock_prisma_client.db.litellm_usertable.create = AsyncMock(return_value=mock_user)
 
     # Create a mock cache
@@ -3384,7 +3384,7 @@ async def test_get_fuzzy_user_object_case_insensitive_email():
 
     # Test: SSO ID not found, find by email with different casing
     mock_prisma.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
-    mock_prisma.db.litellm_usertable.find_first = AsyncMock(return_value=test_user)
+    mock_prisma.db.litellm_usertable.find_many = AsyncMock(return_value=[test_user])
 
     # Search with lowercase email (different from DB)
     result = await _get_fuzzy_user_object(
@@ -3397,11 +3397,158 @@ async def test_get_fuzzy_user_object_case_insensitive_email():
     assert result == test_user
 
     # Verify the query used case-insensitive mode
-    mock_prisma.db.litellm_usertable.find_first.assert_called_once()
-    call_args = mock_prisma.db.litellm_usertable.find_first.call_args
+    mock_prisma.db.litellm_usertable.find_many.assert_called_once()
+    call_args = mock_prisma.db.litellm_usertable.find_many.call_args
     assert call_args.kwargs["where"]["user_email"]["equals"] == "test@example.com"
     assert call_args.kwargs["where"]["user_email"]["mode"] == "insensitive"
     assert call_args.kwargs["include"] == {"organization_memberships": True}
+    assert call_args.kwargs["take"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_subject", ["victim-subject", ""])
+async def test_email_link_cannot_replace_existing_subject(existing_subject):
+    table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        find_many=AsyncMock(
+            return_value=[
+                LiteLLM_UserTable(user_id="victim", user_email="same@example.com", sso_user_id=existing_subject)
+            ]
+        ),
+        update_many=AsyncMock(),
+    )
+    prisma = SimpleNamespace(db=SimpleNamespace(litellm_usertable=table))
+    with pytest.raises(ValueError, match="already belongs"):
+        await _get_fuzzy_user_object(prisma, "different-subject", "same@example.com")
+    table.update_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verified_first_email_link_waits_for_conditional_write_and_reads_current_row():
+    before = LiteLLM_UserTable(user_id="legacy", user_email="Person@Example.com", sso_user_id=None)
+    after = before.model_copy(update={"sso_user_id": "subject"})
+    table = SimpleNamespace(
+        find_unique=AsyncMock(side_effect=[None, after]),
+        find_many=AsyncMock(return_value=[before]),
+        update_many=AsyncMock(return_value=1),
+    )
+    prisma = SimpleNamespace(db=SimpleNamespace(litellm_usertable=table))
+    result = await _get_fuzzy_user_object(prisma, "subject", "person@example.com")
+    assert result is after
+    table.update_many.assert_awaited_once_with(
+        where={
+            "user_id": "legacy",
+            "sso_user_id": None,
+            "user_email": {"equals": "person@example.com", "mode": "insensitive"},
+        },
+        data={"sso_user_id": "subject"},
+    )
+    assert table.find_unique.await_args_list[-1].kwargs == {
+        "where": {"user_id": "legacy"},
+        "include": {"organization_memberships": True},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "after",
+    [
+        None,
+        LiteLLM_UserTable(user_id="legacy", user_email="person@example.com", sso_user_id="winner"),
+        LiteLLM_UserTable(user_id="legacy", user_email="changed@example.com", sso_user_id="subject"),
+    ],
+)
+async def test_email_link_lost_cas_or_changed_email_never_returns_identity(after):
+    before = LiteLLM_UserTable(user_id="legacy", user_email="person@example.com", sso_user_id=None)
+    table = SimpleNamespace(
+        find_unique=AsyncMock(side_effect=[None, after]),
+        find_many=AsyncMock(return_value=[before]),
+        update_many=AsyncMock(return_value=0),
+    )
+    with pytest.raises(ValueError, match="changed during"):
+        await _get_fuzzy_user_object(
+            SimpleNamespace(db=SimpleNamespace(litellm_usertable=table)), "subject", "person@example.com"
+        )
+
+
+@pytest.mark.asyncio
+async def test_email_link_ambiguous_rows_are_not_selected_or_changed():
+    table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        find_many=AsyncMock(return_value=[LiteLLM_UserTable(user_id="one"), LiteLLM_UserTable(user_id="two")]),
+        update_many=AsyncMock(),
+    )
+    with pytest.raises(ValueError, match="multiple identities"):
+        await _get_fuzzy_user_object(
+            SimpleNamespace(db=SimpleNamespace(litellm_usertable=table)), "subject", "person@example.com"
+        )
+    table.update_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_existing_subject_match_does_not_use_email_or_write():
+    actual = LiteLLM_UserTable(user_id="existing", sso_user_id="subject")
+    table = SimpleNamespace(find_unique=AsyncMock(return_value=actual), find_many=AsyncMock(), update_many=AsyncMock())
+    result = await _get_fuzzy_user_object(SimpleNamespace(db=SimpleNamespace(litellm_usertable=table)), "subject", None)
+    assert result is actual
+    table.find_many.assert_not_awaited()
+    table.update_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_email_link_write_cannot_authenticate_before_commit():
+    table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        find_many=AsyncMock(return_value=[LiteLLM_UserTable(user_id="legacy", user_email="person@example.com")]),
+        update_many=AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await _get_fuzzy_user_object(
+            SimpleNamespace(db=SimpleNamespace(litellm_usertable=table)), "subject", "person@example.com"
+        )
+    assert table.find_unique.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_competing_email_links_cannot_overwrite_first_committed_subject():
+    original = LiteLLM_UserTable(user_id="legacy", user_email="person@example.com", sso_user_id=None)
+    state = {"row": original, "readers": 0, "writes": 0}
+    both_read = asyncio.Event()
+
+    async def find_unique(*, where, include):
+        if "sso_user_id" in where:
+            return None
+        return state["row"]
+
+    async def find_many(*, where, include, take):
+        state["readers"] += 1
+        if state["readers"] == 2:
+            both_read.set()
+        await both_read.wait()
+        return [original]
+
+    async def update_many(*, where, data):
+        assert where == {
+            "user_id": "legacy",
+            "sso_user_id": None,
+            "user_email": {"equals": "person@example.com", "mode": "insensitive"},
+        }
+        if state["row"].sso_user_id is not None:
+            return 0
+        state["row"] = original.model_copy(update=data)
+        state["writes"] += 1
+        return 1
+
+    table = SimpleNamespace(find_unique=find_unique, find_many=find_many, update_many=update_many)
+    prisma = SimpleNamespace(db=SimpleNamespace(litellm_usertable=table))
+    results = await asyncio.gather(
+        *(_get_fuzzy_user_object(prisma, subject, "person@example.com") for subject in ("first", "second")),
+        return_exceptions=True,
+    )
+    assert state["writes"] == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    winner = next(result for result in results if not isinstance(result, Exception))
+    assert winner.sso_user_id == state["row"].sso_user_id
 
 
 @pytest.mark.asyncio

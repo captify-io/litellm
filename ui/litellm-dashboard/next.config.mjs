@@ -7,6 +7,9 @@ const __dirname = path.dirname(__filename);
 
 const nextConfig = {
   output: "export",
+  typescript: {
+    tsconfigPath: "tsconfig.build.json",
+  },
   compiler: {
     removeConsole: process.env.NODE_ENV === "production" ? { exclude: ["error", "warn"] } : false,
   },

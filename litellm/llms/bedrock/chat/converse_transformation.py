@@ -19,7 +19,6 @@ from litellm.constants import (
 )
 from litellm.litellm_core_utils.core_helpers import (
     filter_exceptions_from_params,
-    filter_internal_params,
     map_finish_reason,
     safe_deep_copy,
 )
@@ -1255,6 +1254,8 @@ class AmazonConverseConfig(BaseConfig):
         self, optional_params: dict, model: str, drop_params: bool = False
     ) -> tuple[dict, dict, dict, OutputConfigBlock | None]:
         """Prepare and separate request parameters."""
+        from litellm.litellm_core_utils.core_helpers import filter_internal_params
+
         # Consume the internal ``_output_config_normalized`` marker set by
         # ``_handle_reasoning_effort_parameter`` so it does not linger on the
         # caller's ``optional_params`` after the transformation returns.
@@ -1330,7 +1331,9 @@ class AmazonConverseConfig(BaseConfig):
 
         # Filter out internal/MCP-related parameters that shouldn't be sent to the API
         # These are LiteLLM internal parameters, not API parameters
-        additional_request_params = filter_internal_params(additional_request_params)
+        additional_request_params = filter_internal_params(
+            additional_request_params, additional_internal_params=frozenset(("client_metadata",))
+        )
 
         # Filter out non-serializable objects (exceptions, callables, logging objects, etc.)
         # from additional_request_params to prevent JSON serialization errors

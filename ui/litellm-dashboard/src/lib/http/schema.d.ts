@@ -2033,6 +2033,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/captify/v1/agent-authoring-capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Agent Authoring Capabilities */
+        get: operations["agent_authoring_capabilities_captify_v1_agent_authoring_capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/captify/v1/agent-tools-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Agent Tools Access */
+        post: operations["agent_tools_access_captify_v1_agent_tools_access_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/captify/v1/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Owned Agent */
+        post: operations["create_owned_agent_captify_v1_agents_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/captify/v1/agents/{agent_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Patch Agent Conditionally */
+        patch: operations["patch_agent_conditionally_captify_v1_agents__agent_id__patch"];
+        trace?: never;
+    };
     "/chat/completions": {
         parameters: {
             query?: never;
@@ -16889,16 +16957,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Agent By Id
-         * @description Get a specific agent by ID
-         *
-         *     Example Request:
-         *     ```bash
-         *     curl -X GET "http://localhost:4000/v1/agents/123e4567-e89b-12d3-a456-426614174000" \
-         *         -H "Authorization: Bearer <your_api_key>"
-         *     ```
-         */
+        /** Get Agent By Id */
         get: operations["get_agent_by_id_v1_agents__agent_id__get"];
         /**
          * Update Agent
@@ -22511,6 +22570,39 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /** AgentAuthoringCapabilities */
+        AgentAuthoringCapabilities: {
+            /**
+             * Authoritativeread
+             * @default true
+             * @constant
+             */
+            authoritativeRead: true;
+            /**
+             * Conditionalupdate
+             * @default true
+             * @constant
+             */
+            conditionalUpdate: true;
+            /**
+             * Ownedcreate
+             * @default true
+             * @constant
+             */
+            ownedCreate: true;
+            /**
+             * Schemaversion
+             * @default 1
+             * @constant
+             */
+            schemaVersion: 1;
+            /**
+             * Versionheader
+             * @default X-Captify-Agent-Version
+             * @constant
+             */
+            versionHeader: "X-Captify-Agent-Version";
+        };
         /**
          * AgentCapabilities
          * @description Defines optional capabilities supported by an agent.
@@ -25134,6 +25226,15 @@ export interface components {
             /** Regulation */
             regulation: string;
         };
+        /** ConditionalAgentPatch */
+        ConditionalAgentPatch: {
+            /** Expected Version */
+            expected_version: string;
+            /** Patch */
+            patch: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+        };
         /** ConfigFieldDelete */
         ConfigFieldDelete: {
             /**
@@ -27577,6 +27678,7 @@ export interface components {
             /** Updated By */
             updated_by?: string | null;
         };
+        JsonValue: unknown;
         /** KeyHealthResponse */
         KeyHealthResponse: {
             /**
@@ -32307,6 +32409,21 @@ export interface components {
             /** Tpm Limit */
             tpm_limit?: number | null;
         };
+        /** OwnedAgentCreate */
+        OwnedAgentCreate: {
+            /** Actor Id */
+            actor_id: string;
+            /** Agent Id */
+            agent_id: string;
+            /** Owner Key Hash */
+            owner_key_hash: string;
+            /** Record */
+            record: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /** Tenant Id */
+            tenant_id: string;
+        };
         /**
          * PageLinks
          * @description Hypermedia for a paginated list. No `first`/`last`: without a total count the last page is unknown.
@@ -36369,6 +36486,27 @@ export interface components {
             tokenizer_type: string;
             /** Total Tokens */
             total_tokens: number;
+        };
+        /** ToolAccessRequest */
+        ToolAccessRequest: {
+            /** Actor Id */
+            actor_id: string;
+            /** App Permission Revision */
+            app_permission_revision: string;
+            /** Owner Key Hash */
+            owner_key_hash: string;
+            /** Tenant Id */
+            tenant_id: string;
+        };
+        /** ToolAccessResult */
+        ToolAccessResult: {
+            /** Serverid */
+            serverId: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "admitted" | "unchanged";
         };
         /** ToolDetailResponse */
         ToolDetailResponse: {
@@ -41719,6 +41857,127 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CallbacksByType"];
+                };
+            };
+        };
+    };
+    agent_authoring_capabilities_captify_v1_agent_authoring_capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentAuthoringCapabilities"];
+                };
+            };
+        };
+    };
+    agent_tools_access_captify_v1_agent_tools_access_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolAccessRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolAccessResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_owned_agent_captify_v1_agents_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OwnedAgentCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_agent_conditionally_captify_v1_agents__agent_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConditionalAgentPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

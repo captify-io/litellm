@@ -95,7 +95,8 @@ def _scalars(node: object, key: str) -> tuple[Scalar, ...]:
 def _config_files() -> tuple[pathlib.Path, ...]:
     workflows = tuple(sorted(path for path in WORKFLOW_DIR.iterdir() if path.suffix in (".yml", ".yaml")))
     circleci = (CIRCLECI_CONFIG,) if CIRCLECI_CONFIG.is_file() else ()
-    return workflows + circleci
+    gitlab: Final = (REPO_ROOT / ".gitlab-ci.yml",) if (REPO_ROOT / ".gitlab-ci.yml").is_file() else ()
+    return workflows + circleci + gitlab
 
 
 def _all_scalars() -> tuple[Scalar, ...]:

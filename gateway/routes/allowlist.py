@@ -113,8 +113,13 @@ GATEWAY_PATH_PREFIXES: tuple[str, ...] = (
 
 GATEWAY_EXACT_PATHS: frozenset[str] = frozenset(
     {
+        "/captify/v1/agent-tools-access",
         "/",
         "/routes",
+        "/captify/v1/agents",
+        "/captify/v1/agents/{agent_id}",
+        "/captify/v1/agent-authoring-capabilities",
+        "/v1/agents/{agent_id}",
         "/openapi.json",
         "/docs",
         "/docs/oauth2-redirect",

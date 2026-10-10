@@ -1,4 +1,4 @@
-# GitLab CI pipeline for build + SBOM/ATO artifacts (no deploy jobs)
+# GitLab CI pipeline for build + SBOM/ATO artifacts + EC2 deployment
 
 include:
   - template: Jobs/Dependency-Scanning.latest.gitlab-ci.yml
@@ -8,9 +8,10 @@ include:
 stages:
   - build
   - test
-  - scan
   - sbom
   - package
+  - release-gate
+  - deploy
 
 variables:
   DS_INCLUDE_DEV_DEPENDENCIES: "false"
@@ -18,12 +19,18 @@ variables:
   DOCKER_BUILDKIT: "1"
   CYCLONEDX_VERSION: "v0.29.1"
   CYCLONEDX_LINUX_MUSL_X64_SHA256: "526d55f67ac53744f45525f30f0f210d3a95e044b5073904cb3eacb8f8e52135"
+  # Centralized CycloneDX JSON -> XLSX converter image (anautics-tools/cdx2xlsx)
+  CDX2XLSX_IMAGE: "$CI_REGISTRY/anautics-tools/cdx2xlsx:1.0.1"
+  DOCKER_CONFIG: "$CI_PROJECT_DIR/.docker"
 
 build-wheel:
   stage: build
   image: python:3.12-slim-bookworm
   before_script:
-    - python -m pip install --no-cache-dir "uv==0.8.19"
+    # litellm builds a Rust extension via maturin; it needs a C linker, and
+    # maturin bootstraps its own Rust toolchain (requires rust-lang.org access).
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev
+    - python -m pip install --no-cache-dir "uv==0.11.7"
     - uv --version
   script:
     - uv build
@@ -48,19 +55,23 @@ build-image:
         --build-arg BUILDKIT_INLINE_CACHE=1 \
         --cache-from "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         --cache-from "$CI_REGISTRY_IMAGE:latest" \
-        -f Dockerfile \
-        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        -f docker/Dockerfile.non_root \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" \
         --load \
         .
-    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    - test "$(docker image inspect "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" --format '{{.Config.User}}')" = 65534
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
     - |
-      if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
-        docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" "$CI_REGISTRY_IMAGE:latest"
-        docker push "$CI_REGISTRY_IMAGE:latest"
-      fi
+      LITELLM_IMAGE=$(docker image inspect "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" --format '{{index .RepoDigests 0}}')
+      case "$LITELLM_IMAGE" in "$CI_REGISTRY_IMAGE"@sha256:*) ;; *) exit 1 ;; esac
+      printf 'LITELLM_IMAGE=%s\n' "$LITELLM_IMAGE" > release.env
   artifacts:
+    reports:
+      dotenv: release.env
     paths:
       - litellm_version.txt
+      - release.env
     expire_in: 1 week
   rules:
     - when: always
@@ -94,13 +105,14 @@ build-sbom-image:
 
 dashboard-sbom:
   stage: build
-  image: node:20
+  # ui/litellm-dashboard declares engines node>=24.14.1 / npm>=11.10.0
+  image: node:24
   before_script:
     - cd ui/litellm-dashboard
     - npm install -g @cyclonedx/cyclonedx-npm@4.0.0
     - npm ci
   script:
-    - cyclonedx-npm --output-file dashboard-sbom.json --output-format JSON --sv 1.6
+    - cyclonedx-npm --package-lock-only --output-file dashboard-sbom.json --output-format JSON --sv 1.6
     - mv dashboard-sbom.json ../../dashboard-sbom.json
   artifacts:
     paths:
@@ -123,12 +135,18 @@ semgrep-sast:
       sast: gl-sast-report.json
     expire_in: 1 week
   rules:
-    - when: always
+    - when: never
 
 container_scanning:
-  stage: scan
+  stage: test
+  # Override the analyzer template default that disables build artifact downloads.
+  dependencies:
+    - build-image
+  before_script:
+    - 'test -n "$LITELLM_IMAGE"'
+    - export CS_IMAGE="$LITELLM_IMAGE"
   variables:
-    CS_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    CS_IMAGE: "$LITELLM_IMAGE"
     SECURE_LOG_LEVEL: debug
     CI_GITLAB_FIPS_MODE: "false"
   needs:
@@ -137,8 +155,7 @@ container_scanning:
     - job: dependency-scanning
       artifacts: true
       optional: true
-  dependencies:
-    - dependency-scanning
+  allow_failure: false
   artifacts:
     paths:
       - gl-container-scanning-report.json
@@ -149,154 +166,54 @@ container_scanning:
   rules:
     - when: always
 
-grype-sbom-scan:
-  stage: sbom
-  image: alpine:3.22
-  variables:
-    GRYPE_VERSION: "v0.92.0"
-    GRYPE_LINUX_AMD64_SHA256: "1449ea724676f8df6e58da3409087c8bbaee04a346cbee7466353ccf78a9fcac"
-  needs:
-    - job: build-sbom-image
-      artifacts: true
-    - job: dashboard-sbom
-      artifacts: true
-  before_script:
-    - apk add --no-cache curl tar
-    - GRYPE_ARCHIVE="grype_${GRYPE_VERSION#v}_linux_amd64.tar.gz"
-    - curl -fsSL -o "$GRYPE_ARCHIVE" "https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/${GRYPE_ARCHIVE}"
-    - echo "${GRYPE_LINUX_AMD64_SHA256}  ${GRYPE_ARCHIVE}" | sha256sum -c -
-    - tar -xzf "$GRYPE_ARCHIVE" grype
-    - install -m 0755 grype /usr/local/bin/grype
-    - grype version
-  script:
-    - mkdir -p grype-scan-results
-    - |
-      run_grype_scan() {
-        input_file="$1"
-        output_file="$2"
-
-        if [ -f "$input_file" ]; then
-          if ! grype "sbom:$input_file" -o json > "$output_file"; then
-            echo '{"matches":[]}' > "$output_file"
-          fi
-        else
-          echo '{"matches":[]}' > "$output_file"
-        fi
-      }
-
-      run_grype_scan build-sbom.json grype-scan-results/build-sbom-grype.json
-      run_grype_scan runtime-sbom.json grype-scan-results/runtime-sbom-grype.json
-      run_grype_scan dashboard-sbom.json grype-scan-results/dashboard-sbom-grype.json
-  artifacts:
-    paths:
-      - grype-scan-results/
-    expire_in: 1 week
-  rules:
-    - when: always
-
 merge-sbom:
   stage: sbom
   image: alpine:3.22
   variables:
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
   needs:
-    - job: build-image
-      artifacts: true
     - job: build-sbom-image
+      artifacts: true
+    - job: dashboard-sbom
       artifacts: true
     - job: container_scanning
       artifacts: true
+    - job: dependency-scanning
+      artifacts: true
   before_script:
-    - apk add --no-cache curl libgcc libstdc++
-  script:
+    - apk add --no-cache curl libgcc libstdc++ python3
     - curl -fsSL -o ./cyclonedx "https://github.com/CycloneDX/cyclonedx-cli/releases/download/${CYCLONEDX_VERSION}/cyclonedx-linux-musl-x64"
     - echo "${CYCLONEDX_LINUX_MUSL_X64_SHA256}  ./cyclonedx" | sha256sum -c -
     - chmod +x ./cyclonedx
     - ./cyclonedx --version
-    - |
-      CONTAINER_SBOM=$(ls gl-sbom*.cdx.json 2>/dev/null | head -1)
-      if [ -z "$CONTAINER_SBOM" ]; then
-        echo "WARNING: no container SBOM found; using environment SBOM only"
-      else
-        echo "Using container SBOM: $CONTAINER_SBOM"
-      fi
-    - |
-      if [ -n "$CONTAINER_SBOM" ]; then
-        ./cyclonedx merge \
-          --input-files "$CONTAINER_SBOM" build-sbom.json \
-          --output-file build-sbom-merged.cdx.json \
-          --output-format json \
-          --output-version v1_6
-      else
-        ./cyclonedx merge \
-          --input-files build-sbom.json \
-          --output-file build-sbom-merged.cdx.json \
-          --output-format json \
-          --output-version v1_6
-      fi
-    - |
-      if [ -n "$CONTAINER_SBOM" ]; then
-        ./cyclonedx merge \
-          --input-files "$CONTAINER_SBOM" runtime-sbom.json \
-          --output-file runtime-sbom-merged.cdx.json \
-          --output-format json \
-          --output-version v1_6
-      else
-        ./cyclonedx merge \
-          --input-files runtime-sbom.json \
-          --output-file runtime-sbom-merged.cdx.json \
-          --output-format json \
-          --output-version v1_6
-      fi
-  artifacts:
-    paths:
-      - build-sbom-merged.cdx.json
-      - runtime-sbom-merged.cdx.json
-      - dashboard-sbom.json
-    expire_in: 1 week
-  rules:
-    - when: always
-
-enrich-sboms:
-  stage: sbom
-  image: python:3.12-slim-bookworm
-  needs:
-    - job: merge-sbom
-      artifacts: true
-    - job: dependency-scanning
-      artifacts: true
-    - job: dashboard-sbom
-      artifacts: true
-    - job: grype-sbom-scan
-      artifacts: true
-  before_script:
-    - python -m pip install --no-cache-dir "uv==0.8.19"
-    - uv --version
-    - pip install pandas openpyxl
   script:
+    - CONTAINER_SBOM=$(ls gl-sbom*.cdx.json 2>/dev/null | head -1 || true)
+    - '[ -n "$CONTAINER_SBOM" ] && echo "Using container SBOM: $CONTAINER_SBOM" || echo "WARNING: no container SBOM found; merging environment SBOMs only"'
+    - |
+      for TARGET in build runtime; do
+        echo "Merging ${TARGET} SBOM..."
+        ./cyclonedx merge \
+          --input-files $CONTAINER_SBOM "${TARGET}-sbom.json" \
+          --output-file "${TARGET}-sbom-merged.cdx.json" \
+          --output-format json \
+          --output-version v1_6
+      done
+    # The dashboard SBOM covers the npm workspace only, so it needs no container merge.
+    - cp dashboard-sbom.json dashboard-sbom-merged.cdx.json
     - |
       if [ -f gl-dependency-scanning-report.json ]; then
-        echo "Using GitLab dependency scanning report for SBOM enrichment"
-        python scripts/sbom-vuln-injection.py build-sbom-merged.cdx.json gl-dependency-scanning-report.json build-sbom-enriched.cdx.json
-        python scripts/sbom-vuln-injection.py runtime-sbom-merged.cdx.json gl-dependency-scanning-report.json runtime-sbom-enriched.cdx.json
-        python scripts/sbom-vuln-injection.py dashboard-sbom.json gl-dependency-scanning-report.json dashboard-sbom-enriched.cdx.json
-      else
-        echo "GitLab dependency scan not found; falling back to Grype results"
-
-        mkdir -p grype-scan-results
-        for fallback_file in \
-          grype-scan-results/build-sbom-grype.json \
-          grype-scan-results/runtime-sbom-grype.json \
-          grype-scan-results/dashboard-sbom-grype.json; do
-          if [ ! -f "$fallback_file" ]; then
-            echo "WARNING: Missing $fallback_file; creating empty fallback report"
-            echo '{"matches":[]}' > "$fallback_file"
-          fi
+        for TARGET in build runtime dashboard; do
+          echo "Injecting vulnerabilities into ${TARGET} SBOM..."
+          python3 scripts/sbom-vuln-injection.py \
+            "${TARGET}-sbom-merged.cdx.json" \
+            gl-dependency-scanning-report.json \
+            "${TARGET}-sbom-enriched.cdx.json"
         done
-
-        python scripts/sbom-vuln-injection.py build-sbom-merged.cdx.json grype-scan-results/build-sbom-grype.json build-sbom-enriched.cdx.json
-        python scripts/sbom-vuln-injection.py runtime-sbom-merged.cdx.json grype-scan-results/runtime-sbom-grype.json runtime-sbom-enriched.cdx.json
-        python scripts/sbom-vuln-injection.py dashboard-sbom.json grype-scan-results/dashboard-sbom-grype.json dashboard-sbom-enriched.cdx.json
+      else
+        echo "WARNING: gl-dependency-scanning-report.json not found; SBOMs will carry no vulnerability data"
+        for TARGET in build runtime dashboard; do
+          cp "${TARGET}-sbom-merged.cdx.json" "${TARGET}-sbom-enriched.cdx.json"
+        done
       fi
   artifacts:
     paths:
@@ -309,17 +226,36 @@ enrich-sboms:
 
 convert-sbom:
   stage: sbom
-  image: python:3.12-slim-bookworm
-  before_script:
-    - python -m pip install --no-cache-dir "uv==0.8.19"
-    - uv --version
+  image:
+    name: $CDX2XLSX_IMAGE
+    entrypoint: [""]
   needs:
-    - job: enrich-sboms
+    - job: merge-sbom
       artifacts: true
+  before_script:
+    - |
+      if ! command -v cc >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential
+          rm -rf /var/lib/apt/lists/*
+        elif command -v apk >/dev/null 2>&1; then
+          apk add --no-cache build-base
+        elif command -v dnf >/dev/null 2>&1; then
+          dnf install -y gcc glibc-devel
+          dnf clean all
+        else
+          echo "FATAL: converter image has no C compiler or supported package manager"
+          exit 1
+        fi
+      fi
+    - cc --version
   script:
-    - uv run --with pandas==2.3.3 --with openpyxl==3.1.5 python scripts/convert_sbom_with_vulns.py -i build-sbom-enriched.cdx.json -o build-sbom.xlsx
-    - uv run --with pandas==2.3.3 --with openpyxl==3.1.5 python scripts/convert_sbom_with_vulns.py -i runtime-sbom-enriched.cdx.json -o runtime-sbom.xlsx
-    - uv run --with pandas==2.3.3 --with openpyxl==3.1.5 python scripts/convert_sbom_with_vulns.py -i dashboard-sbom-enriched.cdx.json -o dashboard-sbom.xlsx
+    - |
+      for TARGET in build runtime dashboard; do
+        echo "Converting ${TARGET} SBOM to XLSX..."
+        python /app/cdx2xlsx.py -i "${TARGET}-sbom-enriched.cdx.json" -o "${TARGET}-sbom.xlsx"
+      done
   artifacts:
     paths:
       - build-sbom.xlsx
@@ -346,10 +282,6 @@ package-documents:
       optional: true
     - job: merge-sbom
       artifacts: true
-    - job: dashboard-sbom
-      artifacts: true
-    - job: enrich-sboms
-      artifacts: true
     - job: convert-sbom
       artifacts: true
   script:
@@ -373,13 +305,13 @@ package-documents:
       if [ -f gl-container-scanning-report.json ]; then
         cp gl-container-scanning-report.json "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-gl-container-scanning-report.json"
       fi
-    - cp build-sbom-merged.cdx.json "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-build-sbom-${LITELLM_VERSION}.cdx.json"
-    - cp build-sbom.xlsx "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-build-sbom-${LITELLM_VERSION}.xlsx"
-    - cp runtime-sbom-merged.cdx.json "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-runtime-sbom-${LITELLM_VERSION}.cdx.json"
-    - cp runtime-sbom.xlsx "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-runtime-sbom-${LITELLM_VERSION}.xlsx"
-    - cp dashboard-sbom.json "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-dashboard-sbom-${LITELLM_VERSION}.json"
-    - cp dashboard-sbom-enriched.cdx.json "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-dashboard-sbom-enriched-${LITELLM_VERSION}.cdx.json"
-    - cp dashboard-sbom.xlsx "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-dashboard-sbom-${LITELLM_VERSION}.xlsx"
+    - |
+      for TARGET in build runtime dashboard; do
+        cp "${TARGET}-sbom-enriched.cdx.json" \
+          "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-${TARGET}-sbom-${LITELLM_VERSION}.cdx.json"
+        cp "${TARGET}-sbom.xlsx" \
+          "ci-documents-${CI_PIPELINE_ID}/${DATE}_litellm-${TARGET}-sbom-${LITELLM_VERSION}.xlsx"
+      done
     - ls -1 "ci-documents-${CI_PIPELINE_ID}/"
   artifacts:
     paths:
@@ -387,3 +319,76 @@ package-documents:
     expire_in: 90 days
   rules:
     - when: always
+
+security-release-gate:
+  stage: release-gate
+  image: alpine:3.22
+  needs:
+    - job: container_scanning
+      artifacts: true
+  before_script:
+    - apk add --no-cache bash jq
+  script:
+    - bash scripts/gate-container-vulnerabilities.sh gl-container-scanning-report.json
+
+.deploy_template:
+  stage: deploy
+  needs:
+    - job: build-image
+      artifacts: true
+    - job: package-documents
+      artifacts: false
+    - job: security-release-gate
+      artifacts: false
+  image: python:3.12-slim-bookworm
+  resource_group: litellm-$CI_ENVIRONMENT_NAME
+  interruptible: false
+  before_script:
+    - test "${CI_DEBUG_TRACE:-false}" != "true"
+    - test "${DEBUG_DEPLOY_PASSWORD_FLOW:-false}" != "true"
+    - python3 -m pip install --require-hashes -r deploy/credential-delivery/requirements.txt
+  script:
+    - python3 -m unittest discover -s tests/credential_delivery -v
+    - python3 deploy/credential-delivery/publish.py
+
+deploy-dev:
+  extends: .deploy_template
+  variables:
+    DEPLOY_CONFIG: "$DEV_DEPLOYMENT_CONFIG"
+    ENV_FILE: "$LITELLM_DEV_ENV"
+  environment:
+    name: dev
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+    - when: never
+
+deploy-staging:
+  extends: .deploy_template
+  variables:
+    DEPLOY_CONFIG: "$STAGING_DEPLOYMENT_CONFIG"
+    ENV_FILE: "$LITELLM_STAGING_ENV"
+  environment:
+    name: staging
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+  when: manual
+
+deploy-production:
+  extends: .deploy_template
+  variables:
+    DEPLOY_CONFIG: "$PRODUCTION_DEPLOYMENT_CONFIG"
+    ENV_FILE: "$LITELLM_PRODUCTION_ENV"
+  environment:
+    name: production
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+  when: manual

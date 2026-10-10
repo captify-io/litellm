@@ -98,7 +98,7 @@ class IAMEndpoint:
     name: str
     schema: str | None = None
 
-    def build_url(self, token: str) -> str:
+    def build_url(self, token: str, *, previous_url: str | None = None) -> str:
         """Assemble the connection URL, inserting ``token`` verbatim as the password.
 
         User, database name, and schema are normalized rather than encoded outright,
@@ -110,9 +110,15 @@ class IAMEndpoint:
         base: Final = (
             f"postgresql://{_normalize_quote(self.user)}:{token}@{self.host}:{self.port}/{_normalize_quote(self.name)}"
         )
-        if not self.schema:
-            return base
-        return f"{base}?schema={_normalize_quote(self.schema)}"
+        previous_query: Final = urllib.parse.urlsplit(previous_url or "").query
+        retained: Final = tuple(
+            f"{_quote(key)}={_quote(value)}"
+            for key, value in urllib.parse.parse_qsl(previous_query, keep_blank_values=True)
+            if key != "schema" or not self.schema
+        )
+        schema: Final = (f"schema={_normalize_quote(self.schema)}",) if self.schema else ()
+        query: Final = "&".join(schema + retained)
+        return f"{base}?{query}" if query else base
 
 
 def parse_iam_endpoint_from_url(url: str) -> IAMEndpoint:
