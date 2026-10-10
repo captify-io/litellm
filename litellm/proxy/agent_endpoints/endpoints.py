@@ -1178,3 +1178,12 @@ async def get_agent_daily_activity(
         page=page,
         page_size=page_size,
     )
+
+
+def _install_tool_access_routes() -> None:
+    from litellm.proxy.agent_endpoints.tool_access import router as tool_access_router
+
+    router.include_router(tool_access_router)
+
+
+_install_tool_access_routes()

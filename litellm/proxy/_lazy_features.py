@@ -82,7 +82,7 @@ LAZY_FEATURES: Final[tuple[LazyFeature, ...]] = (
     LazyFeature(
         name="agents",
         module_path="litellm.proxy.agent_endpoints.endpoints",
-        path_prefixes=("/v1/agents", "/agents", "/agent/"),
+        path_prefixes=("/v1/agents", "/agents", "/agent/", "/captify/v1/agent-tools-access"),
     ),
     LazyFeature(
         name="gemini_agents",

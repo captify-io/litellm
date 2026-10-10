@@ -3558,6 +3558,65 @@
           "title": "SpendMetrics",
           "type": "object"
         },
+        "ToolAccessRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Actor Id",
+              "type": "string"
+            },
+            "app_permission_revision": {
+              "maxLength": 512,
+              "minLength": 1,
+              "title": "App Permission Revision",
+              "type": "string"
+            },
+            "owner_key_hash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Owner Key Hash",
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "actor_id",
+            "tenant_id",
+            "owner_key_hash",
+            "app_permission_revision"
+          ],
+          "title": "ToolAccessRequest",
+          "type": "object"
+        },
+        "ToolAccessResult": {
+          "additionalProperties": false,
+          "properties": {
+            "serverId": {
+              "title": "Serverid",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "admitted",
+                "unchanged"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "serverId"
+          ],
+          "title": "ToolAccessResult",
+          "type": "object"
+        },
         "ValidationError": {
           "properties": {
             "ctx": {
@@ -3751,6 +3810,52 @@
             }
           ],
           "summary": "Get Agent Daily Activity",
+          "tags": [
+            "agents"
+          ]
+        }
+      },
+      "/captify/v1/agent-tools-access": {
+        "post": {
+          "operationId": "agent_tools_access_captify_v1_agent_tools_access_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolAccessRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ToolAccessResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "security": [
+            {
+              "APIKeyHeader": []
+            }
+          ],
+          "summary": "Agent Tools Access",
           "tags": [
             "agents"
           ]
