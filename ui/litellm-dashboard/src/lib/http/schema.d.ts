@@ -2033,6 +2033,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/captify/v1/accounts/{user_id}/budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Account Budget */
+        get: operations["read_account_budget_captify_v1_accounts__user_id__budget_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change Account Budget */
+        patch: operations["change_account_budget_captify_v1_accounts__user_id__budget_patch"];
+        trace?: never;
+    };
     "/captify/v1/agent-authoring-capabilities": {
         parameters: {
             query?: never;
@@ -22535,6 +22553,23 @@ export interface components {
             /** Description */
             description?: string | null;
         };
+        /** AccountBudgetChange */
+        AccountBudgetChange: {
+            /** Actor Id */
+            actor_id: string;
+            /** Budget Duration */
+            budget_duration: ("1d" | "7d" | "30d" | "1mo") | null;
+            /** Expected Version */
+            expected_version: string;
+            /** Max Budget */
+            max_budget: number;
+            /** Operation Id */
+            operation_id: string;
+            /** Reason */
+            reason: string;
+            /** Tenant Id */
+            tenant_id: string;
+        };
         /**
          * ActiveUsersAnalyticsResponse
          * @description Response for active users analytics
@@ -23923,6 +23958,22 @@ export interface components {
                 [key: string]: components["schemas"]["MetricWithMetadata"];
             };
         };
+        /** BudgetAudit */
+        BudgetAudit: {
+            account: components["schemas"]["BudgetSnapshot"];
+            /** Actor Id */
+            actor_id: string;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            before: components["schemas"]["BudgetSnapshot"];
+            /** Reason */
+            reason: string;
+            /** Tenant Id */
+            tenant_id: string;
+        };
         /** BudgetConfig */
         BudgetConfig: {
             /** Budget Duration */
@@ -24035,10 +24086,70 @@ export interface components {
              */
             tpm_limit?: number | null;
         };
+        /** BudgetRead */
+        BudgetRead: {
+            /** Budget Duration */
+            budget_duration: string | null;
+            /** Budget Reset At */
+            budget_reset_at: string | null;
+            /**
+             * Currency
+             * @default USD
+             * @constant
+             */
+            currency: "USD";
+            last_change: components["schemas"]["BudgetAudit"] | null;
+            /** Max Budget */
+            max_budget: number | null;
+            /** Remaining */
+            remaining: number | null;
+            /** Spend */
+            spend: number;
+            /** Tenant Id */
+            tenant_id: string;
+            /** User Id */
+            user_id: string;
+            /** Version */
+            version: string;
+        };
         /** BudgetRequest */
         BudgetRequest: {
             /** Budgets */
             budgets: string[];
+        };
+        /** BudgetResult */
+        BudgetResult: {
+            account: components["schemas"]["BudgetSnapshot"];
+            audit: components["schemas"]["BudgetAudit"];
+            /** Operation Id */
+            operation_id: string;
+            /** Replayed */
+            replayed: boolean;
+        };
+        /** BudgetSnapshot */
+        BudgetSnapshot: {
+            /** Budget Duration */
+            budget_duration: string | null;
+            /** Budget Reset At */
+            budget_reset_at: string | null;
+            /**
+             * Currency
+             * @default USD
+             * @constant
+             */
+            currency: "USD";
+            /** Max Budget */
+            max_budget: number | null;
+            /** Remaining */
+            remaining: number | null;
+            /** Spend */
+            spend: number;
+            /** Tenant Id */
+            tenant_id: string;
+            /** User Id */
+            user_id: string;
+            /** Version */
+            version: string;
         };
         /**
          * BulkTeamMemberAddRequest
@@ -41857,6 +41968,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CallbacksByType"];
+                };
+            };
+        };
+    };
+    read_account_budget_captify_v1_accounts__user_id__budget_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+            };
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    change_account_budget_captify_v1_accounts__user_id__budget_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccountBudgetChange"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
