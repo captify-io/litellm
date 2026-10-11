@@ -145,7 +145,9 @@ async def read_budget(database: BudgetDatabase, user_id: str, tenant_id: str) ->
     row: Final = _owned(await database.litellm_usertable.find_unique(where=owner_key), tenant_id)
     events: Final = await database.litellm_auditlog.find_many(
         where={  # mutable-ok: Prisma audit query input.
-            "object_id": user_id, "action": "captify.account-budget.update", "table_name": "LiteLLM_UserTable"
+            "object_id": user_id,
+            "action": "captify.account-budget.update",
+            "table_name": "LiteLLM_UserTable",
         },
         order={"updated_at": "desc"},  # mutable-ok: Prisma query input.
         take=1,
