@@ -132,6 +132,15 @@ def test_backend_mount_paths_defined():
         "BACKEND_MOUNT_PATHS must contain at least one Mount path"
 
 
+def test_account_budget_is_served_only_on_control_plane():
+    assert "/captify/v1/accounts/{user_id}/budget" in _component_paths(
+        app.router.routes, BACKEND_EXACT_PATHS, BACKEND_PATH_PREFIXES
+    )
+    assert "/captify/v1/accounts/{user_id}/budget" not in _component_paths(
+        app.router.routes, GATEWAY_EXACT_PATHS, GATEWAY_PATH_PREFIXES
+    )
+
+
 def test_swagger_mount_in_backend_allowlist():
     """The /swagger Mount must be in BACKEND_MOUNT_PATHS."""
     assert "/swagger" in BACKEND_MOUNT_PATHS, \
