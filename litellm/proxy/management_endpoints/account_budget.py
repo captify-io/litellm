@@ -141,13 +141,13 @@ def _public_audit(receipt: StoredAudit) -> BudgetAudit:
 
 
 async def read_budget(database: BudgetDatabase, user_id: str, tenant_id: str) -> BudgetRead:
-    owner_key: Final = dict(user_id=user_id)  # mutable-ok: Prisma query input.
+    owner_key: Final = {"user_id": user_id}  # mutable-ok: Prisma query input.
     row: Final = _owned(await database.litellm_usertable.find_unique(where=owner_key), tenant_id)
     events: Final = await database.litellm_auditlog.find_many(
-        where=dict(  # mutable-ok: Prisma audit query input.
-            object_id=user_id, action="captify.account-budget.update", table_name="LiteLLM_UserTable"
-        ),
-        order=dict(updated_at="desc"),  # mutable-ok: Prisma query input.
+        where={  # mutable-ok: Prisma audit query input.
+            "object_id": user_id, "action": "captify.account-budget.update", "table_name": "LiteLLM_UserTable"
+        },
+        order={"updated_at": "desc"},  # mutable-ok: Prisma query input.
         take=1,
     )
     return BudgetRead.model_validate(
@@ -165,13 +165,13 @@ async def change_budget(database: BudgetDatabase, user_id: str, body: AccountBud
         raise HTTPException(403, "Ask another authorized staff member to change your allowance")
     operation: Final = "captify-budget:" + body.operation_id
     payload: Final = dict(_metadata(body.model_dump()), user_id=user_id)  # mutable-ok: JSON digest input.
-    owner_key: Final = dict(user_id=user_id)  # mutable-ok: Prisma query input.
+    owner_key: Final = {"user_id": user_id}  # mutable-ok: Prisma query input.
     digest: Final = hashlib.sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).hexdigest()
     async with database.tx() as tx:
         await tx.query_raw('SELECT user_id FROM "LiteLLM_UserTable" WHERE user_id=$1 FOR UPDATE', user_id)
         current: Final = _owned(await tx.litellm_usertable.find_unique(where=owner_key), body.tenant_id)
         previous: Final = await tx.litellm_auditlog.find_unique(
-            where=dict(id=operation)  # mutable-ok: Prisma query input.
+            where={"id": operation}  # mutable-ok: Prisma query input.
         )
         if previous is not None:
             if previous.object_id != user_id:
@@ -190,17 +190,17 @@ async def change_budget(database: BudgetDatabase, user_id: str, body: AccountBud
             raise HTTPException(409, "The account changed; reload its allowance before saving")
         period: Final[Mapping[str, object]] = (
             MappingProxyType(
-                dict(
-                    budget_duration=body.budget_duration,
-                    budget_reset_at=get_budget_reset_time(body.budget_duration) if body.budget_duration else None,
-                )
+                {
+                    "budget_duration": body.budget_duration,
+                    "budget_reset_at": get_budget_reset_time(body.budget_duration) if body.budget_duration else None,
+                }
             )
             if current.budget_duration != body.budget_duration
             else MappingProxyType({})
         )
         saved: Final = _owned(
             await tx.litellm_usertable.update(
-                where=dict(user_id=user_id),  # mutable-ok: Prisma query input.
+                where={"user_id": user_id},  # mutable-ok: Prisma query input.
                 data=dict(  # mutable-ok: Prisma update input.
                     max_budget=body.max_budget,
                     metadata=json.dumps(
@@ -223,15 +223,15 @@ async def change_budget(database: BudgetDatabase, user_id: str, body: AccountBud
             request_digest=digest,
         )
         await tx.litellm_auditlog.create(
-            data=dict(  # mutable-ok: Prisma audit insert input.
-                id=operation,
-                changed_by=body.actor_id,
-                action="captify.account-budget.update",
-                table_name="LiteLLM_UserTable",
-                object_id=user_id,
-                before_value=before.model_dump_json(),
-                updated_values=committed.model_dump_json(),
-            )
+            data={  # mutable-ok: Prisma audit insert input.
+                "id": operation,
+                "changed_by": body.actor_id,
+                "action": "captify.account-budget.update",
+                "table_name": "LiteLLM_UserTable",
+                "object_id": user_id,
+                "before_value": before.model_dump_json(),
+                "updated_values": committed.model_dump_json(),
+            }
         )
         return BudgetResult(
             account=committed.account, operation_id=body.operation_id, replayed=False, audit=_public_audit(committed)
