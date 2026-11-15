@@ -24,7 +24,7 @@ variables:
   DOCKER_CONFIG: "$CI_PROJECT_DIR/.docker"
   # SAST covers what ships in the image; upstream's samples, tests, docs, CI and
   # committed dashboard build output are not part of it.
-  SAST_EXCLUDED_PATHS: "spec, test, tests, tmp, cookbook, docs, .github, .circleci, litellm/proxy/_experimental/out, **/*.test.ts, **/*.test.tsx, **/__tests__, scripts, litellm-rust"
+  SAST_EXCLUDED_PATHS: "spec, test, tests, tmp, cookbook, docs, .github, .circleci, litellm/proxy/_experimental/out, **/*.test.ts, **/*.test.tsx, **/__tests__, scripts, litellm-rust, terraform"
   # Dependency scanning likewise covers the image's own locks (uv.lock, the dashboard's
   # package-lock.json); samples, CI-only tooling and tools that never ship stay out.
   DS_EXCLUDED_PATHS: "spec, test, tests, tmp, cookbook, docs, deploy, scripts, terraform, vscode-extension, .github, .circleci"
@@ -62,6 +62,7 @@ build-image:
         --cache-from "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         --cache-from "$CI_REGISTRY_IMAGE:latest" \
         -f docker/Dockerfile.non_root \
+        --no-cache-filter runtime \
         --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
         -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" \
         --load \
