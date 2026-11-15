@@ -1,20 +1,17 @@
 """Resolve which reasoning_effort values a deployment, and by intersection a model group, accepts.
 
-An entry that states its levels outright in reasoning_effort_levels is read first and wins
-whole, for a model whose set the per-level flags cannot express: Kimi K3 takes low, high and max,
-and no flag can drop medium because medium has none. Every other entry answers through the
-supports_*_reasoning_effort flags below, whose polarity mirrors how a request path reads that same
-flag. medium and high are unconditional for a reasoning model. minimal and low are opt-out:
-openai/chat/gpt_5_transformation.py refuses them only when the map says false. xhigh and max are
-opt-in. none is opt-out everywhere except the azure gpt-5 family, whose config raises
-UnsupportedParamsError without an explicit true.
+An entry that states its levels outright in reasoning_effort_levels wins whole, for a model whose set
+the per-level flags cannot express (Kimi K3 takes low, high and max, and no flag can drop medium).
+Every other entry answers through its supports_*_reasoning_effort flags, read with the polarity the
+chat gate uses: medium and high are unconditional, minimal and low are opt-out (refused only on an
+explicit false), xhigh is opt-in, and none is opt-out except on the azure gpt-5 family, whose chat
+config refuses it without an explicit true.
 
-xhigh is gated on the request path by the openai and azure gpt-5 configs. max is not gated there at
-all: every entry carrying supports_max_reasoning_effort is Claude-family, and
-anthropic/chat/transformation.py gates max on the output_config path while its reasoning_effort
-path maps any level to a thinking budget. Making max opt-in is a deliberate trade, then, since an
-explicit flag is the only signal that the tier is a real one rather than litellm rounding the level
-to a budget, and a missing flag costs advisory metadata rather than a rejected request.
+The Responses gate reads none, minimal, low and xhigh as opt-out. Neither gate judges max, which
+Chat Completions refuses and Responses honors on the gpt-6 family, so its flag is advisory and
+advertised opt-in: outside the gpt-6 rows every entry carrying supports_max_reasoning_effort is
+Claude-family, where anthropic/chat/transformation.py gates max on the output_config path, so an
+explicit flag is the only signal that the tier is real.
 
 A deployment the map describes with no effort flags at all resolves to None rather than to the
 opt-out defaults. 689 of the map's 854 reasoning entries carry no flag, and the o-series, xai and
@@ -34,7 +31,7 @@ from typing import Final, get_args
 import litellm
 from litellm.types.llms.openai import REASONING_EFFORT
 
-REASONING_EFFORT_ADVERTISEMENT_ORDER: Final = get_args(REASONING_EFFORT)
+REASONING_EFFORT_ADVERTISEMENT_ORDER: Final[tuple[str, ...]] = get_args(REASONING_EFFORT)
 _EMPTY_ENTRY: Final[Mapping[str, object]] = MappingProxyType({})
 
 _EFFORT_FLAGS: Final = (
@@ -101,6 +98,25 @@ def declared_reasoning_efforts_for_model(model: str, custom_llm_provider: str) -
     if not isinstance(entry, dict):
         return None
     return declared_reasoning_efforts(entry)
+
+
+REASONING_EFFORT_STRENGTH_ORDER: Final = ("minimal", "low", "medium", "high", "xhigh", "max")
+_STRENGTH_RANK: Final = MappingProxyType({effort: rank for rank, effort in enumerate(REASONING_EFFORT_STRENGTH_ORDER)})
+
+
+def nearest_declared_reasoning_effort(requested: str, declared: Sequence[str]) -> str:
+    """Rounds a request up to the weakest declared level at least as strong as it, and down to the
+    strongest declared level when it asks for more than the model has, so the caller gets no less
+    reasoning than it asked for instead of a rejected call. none is the off switch rather than a
+    strength, so it is never rounded onto the ladder and no level is rounded down to it: a caller
+    who turned reasoning off must not be billed for it, and a model that cannot turn it off says so
+    itself. A level outside the strength order is likewise returned as is for upstream to judge."""
+    ranked: Final = sorted(
+        (effort for effort in declared if effort in _STRENGTH_RANK), key=lambda effort: _STRENGTH_RANK[effort]
+    )
+    if requested in ranked or requested not in _STRENGTH_RANK or not ranked:
+        return requested
+    return next((effort for effort in ranked if _STRENGTH_RANK[effort] >= _STRENGTH_RANK[requested]), ranked[-1])
 
 
 def _supports_none_reasoning_effort(model_info: Mapping[str, object], flag: object) -> bool:

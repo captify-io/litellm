@@ -1,6 +1,6 @@
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
-from typing_extensions import TypedDict
+from typing_extensions import ReadOnly, TypedDict
 
 
 class BedrockKBLocation(TypedDict, total=False):
@@ -114,10 +114,20 @@ class BedrockKBRetrievalConfiguration(TypedDict, total=False):
     vectorSearchConfiguration: BedrockKBVectorSearchConfiguration | None
 
 
+BedrockKBImageFormat: TypeAlias = Literal["png", "jpeg", "gif", "webp"]
+
+
+class BedrockKBInputImage(TypedDict):
+    format: ReadOnly[BedrockKBImageFormat]
+    inlineContent: ReadOnly[str]
+
+
 class BedrockKBRetrievalQuery(TypedDict, total=False):
     """Query structure for retrieval."""
 
     text: str | None
+    type: ReadOnly[Literal["TEXT", "IMAGE"]]
+    image: ReadOnly[BedrockKBInputImage]
 
 
 class BedrockKBGuardrailConfiguration(TypedDict, total=False):
@@ -127,6 +137,10 @@ class BedrockKBGuardrailConfiguration(TypedDict, total=False):
     guardrailVersion: str | None
 
 
+class BedrockKBUserContext(TypedDict):
+    userId: ReadOnly[str]
+
+
 class BedrockKBRequest(TypedDict, total=False):
     """Complete request structure for Bedrock Knowledge Base retrieval."""
 
@@ -134,6 +148,7 @@ class BedrockKBRequest(TypedDict, total=False):
     nextToken: str | None
     retrievalConfiguration: BedrockKBRetrievalConfiguration | None
     retrievalQuery: BedrockKBRetrievalQuery
+    userContext: ReadOnly[BedrockKBUserContext | None]
 
 
 #########################################################################

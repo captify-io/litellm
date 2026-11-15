@@ -14,7 +14,6 @@ ENV_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 DOCS_BASE = "./docs/my-website/docs"
-RUNTIME_DOCS_BASE = "./docs/runtime"
 REFERENCE_TABLE_PATH = f"{DOCS_BASE}/proxy/config_settings.md"
 DOCS_SUFFIXES = (".md", ".mdx")
 DOCUMENTED_KEY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]*\b")
@@ -32,6 +31,15 @@ EXCLUDED_GUARD_ONLY_VARS = {
 EXCLUDED_ROLLOUT_FLAGS = {
     "LITELLM_USE_RUST_OCR",
     "LITELLM_RUST",
+    "LITELLM_BUILTIN_PASS_THROUGH_ROUTES_FIRST",
+}
+
+# Internal infrastructure tuning parameters for streaming/queue management
+# These are advanced settings with sensible defaults that most users should not modify
+EXCLUDED_INTERNAL_TUNING_VARS = {
+    "ANTHROPIC_MESSAGES_MAX_DETACHED_STREAM_DRAINS",
+    "ANTHROPIC_MESSAGES_STREAM_RELAY_QUEUE_MAXSIZE",
+    "DEFAULT_S3_MAX_ADAPTIVE_CONCURRENCY",
 }
 
 EXCLUDED_TERMINAL_VARS = {
@@ -51,7 +59,9 @@ EXCLUDED_TERMINAL_VARS = {
     "ALACRITTY_SOCKET",
 }
 
-EXCLUDED_KEYS = frozenset(EXCLUDED_TERMINAL_VARS | EXCLUDED_GUARD_ONLY_VARS | EXCLUDED_ROLLOUT_FLAGS)
+EXCLUDED_KEYS = frozenset(
+    EXCLUDED_TERMINAL_VARS | EXCLUDED_GUARD_ONLY_VARS | EXCLUDED_ROLLOUT_FLAGS | EXCLUDED_INTERNAL_TUNING_VARS
+)
 
 # Directories to skip (dependencies, venvs, caches) - only scan litellm source
 SKIP_DIRS = {
@@ -116,7 +126,7 @@ def main() -> None:
     if not os.path.isdir(DOCS_BASE):
         raise Exception(f"No documentation found at {DOCS_BASE}; check out BerriAI/litellm-docs into docs/my-website")
 
-    undocumented_keys = undocumented_env_keys(repo_base, DOCS_BASE) - collect_documented_keys(RUNTIME_DOCS_BASE)
+    undocumented_keys = undocumented_env_keys(repo_base, DOCS_BASE)
     if undocumented_keys:
         raise Exception(
             f"Environment variables read under {repo_base} but mentioned nowhere in the docs: "

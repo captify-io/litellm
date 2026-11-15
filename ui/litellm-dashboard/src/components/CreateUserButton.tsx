@@ -14,7 +14,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Alert, AlertDescription, AlertTitle } from "@/components/shared/Alert";
 import { ChevronRight, CircleHelp, Info, UserPlus } from "lucide-react";
 import React, { useEffect, useState } from "react";
-import { v4 as generateUUID } from "uuid";
 import { useForm } from "react-hook-form";
 import TeamDropdown from "./common_components/team_dropdown";
 import { getModelDisplayName } from "./key_team_helpers/fetch_available_models_team_key";
@@ -27,6 +26,19 @@ import {
   userCreateCall,
 } from "./networking";
 import OnboardingModal, { InvitationLink } from "./onboarding_link";
+
+// Helper function to generate UUID compatible across all environments
+const generateUUID = (): string => {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback UUID generation for environments without crypto.randomUUID
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c == "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
 
 interface CreateuserProps {
   userID: string;
@@ -47,7 +59,7 @@ interface UISettings {
 interface CreateUserFormValues {
   user_email?: string;
   user_role: string;
-  team_id?: string;
+  team_id?: string | null;
   organization_ids?: string[];
   metadata?: string;
   send_invite_email: boolean;
@@ -258,7 +270,7 @@ export const CreateUserButton: React.FC<CreateuserProps> = ({
   );
 
   const sendInviteEmailField = (
-    <FormField control={form.control} name="send_invite_email" label="Send invitation email">
+    <FormField control={form.control} name="send_invite_email" label="Send invitation email" orientation="horizontal">
       {({ id, value, onChange, onBlur }) => (
         <Checkbox id={id} checked={value} onCheckedChange={onChange} onBlur={onBlur} />
       )}

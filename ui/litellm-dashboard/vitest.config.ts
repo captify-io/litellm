@@ -16,7 +16,7 @@ const sharedViteConfig = {
   plugins: [staticImageData],
   resolve: { alias: { "@": resolve(__dirname, "src") } },
   define: { "import.meta.vitest": "undefined" },
-  oxc: { jsx: { runtime: "automatic", importSource: "react" } } as const,
+  esbuild: { jsx: "automatic", jsxImportSource: "react" } as const,
 };
 
 const TEST_TS_FILES_THAT_RENDER_REACT: readonly string[] = [

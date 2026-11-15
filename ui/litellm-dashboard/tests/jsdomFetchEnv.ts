@@ -1,8 +1,8 @@
-import { builtinEnvironments, type Environment } from "vitest/runtime";
+import { builtinEnvironments, type Environment } from "vitest/environments";
 
 const env: Environment = {
   name: "jsdom-fetch",
-  viteEnvironment: "client",
+  transformMode: "web",
   async setup(global, options) {
     const nativeAbortController = global.AbortController;
     const nativeAbortSignal = global.AbortSignal;

@@ -366,7 +366,7 @@
 
 <div class="connect">
   <label>Proxy URL <input id="proxy-url" type="text" value="http://localhost:4000" /></label>
-  <label>API Key <input id="api-key" type="password" placeholder="sk-1234" /></label>
+  <label>API Key <input id="api-key" type="password" placeholder="LITELLM_MASTER_KEY" /></label>
   <label>Router
     <input id="router" type="text" value="smart-cheap-router" style="width:160px" />
   </label>
@@ -475,7 +475,7 @@ const STATE = {
 
 // ---- session ---------------------------------------------------------
 function newSession() {
-  STATE.sessionId = "chat-" + Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+  STATE.sessionId = "chat-" + Math.random().toString(36).slice(2, 10);
   STATE.messages = [];
   STATE.msgCount = 0;
   STATE.lastModel = null;
@@ -765,7 +765,7 @@ function connect() {
   STATE.connected  = true;
 
   ssSet("ar_proxy_url", url);
-
+  ssSet("ar_api_key",   key);
   ssSet("ar_router",    router);
 
   setConn(true);
@@ -827,7 +827,7 @@ document.querySelectorAll(".sc-btn[data-id]").forEach(btn => {
 // ---- restore session storage -----------------------------------------
 window.addEventListener("DOMContentLoaded", () => {
   const u = ssGet("ar_proxy_url"); if (u) document.getElementById("proxy-url").value = u;
-  try { sessionStorage.removeItem("ar_api_key"); } catch {}
+  const k = ssGet("ar_api_key");   if (k) document.getElementById("api-key").value   = k;
   const r = ssGet("ar_router");    if (r) document.getElementById("router").value     = r;
   newSession();
   renderInfo();

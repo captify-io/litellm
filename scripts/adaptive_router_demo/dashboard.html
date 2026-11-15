@@ -255,7 +255,7 @@
 
 <div class="connect">
   <label>Proxy URL <input id="proxy-url" type="text" value="http://localhost:4000" /></label>
-  <label>Master Key <input id="api-key" type="password" placeholder="sk-1234" /></label>
+  <label>Master Key <input id="api-key" type="password" placeholder="LITELLM_MASTER_KEY" /></label>
   <label>Avg tokens/req <input id="avg-tokens" type="number" value="500" min="1" /></label>
   <label>Poll ms <input id="poll-ms" type="number" value="500" min="100" /></label>
   <button id="connect-btn">Connect</button>
@@ -616,7 +616,7 @@ document.getElementById("connect-btn").addEventListener("click", () => {
   STATE.pollMs    = parseInt(document.getElementById("poll-ms").value, 10) || 500;
   STATE.avgTokens = parseInt(document.getElementById("avg-tokens").value, 10) || 500;
   ssSet("ar_proxy_url", STATE.proxyUrl);
-
+  ssSet("ar_api_key",   STATE.apiKey);
   startPolling();
 });
 
@@ -627,7 +627,7 @@ document.getElementById("router-select").addEventListener("change", (e) => {
 
 window.addEventListener("DOMContentLoaded", () => {
   const u = ssGet("ar_proxy_url"); if (u) document.getElementById("proxy-url").value = u;
-  try { sessionStorage.removeItem("ar_api_key"); } catch {}
+  const k = ssGet("ar_api_key");   if (k) document.getElementById("api-key").value   = k;
 });
 </script>
 

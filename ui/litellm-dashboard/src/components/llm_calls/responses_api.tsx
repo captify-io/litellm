@@ -1,9 +1,12 @@
 import openai from "openai";
 import { MessageType } from "../chat_ui/types";
 import { TokenUsage } from "../chat_ui/ResponseMetrics";
-import { getProxyBaseUrl } from "@/components/networking";
+import { getGatewayBaseUrl } from "@/components/networking";
 import { toast } from "@/lib/toast";
 import { extractPromptCacheTokens } from "@/utils/promptCacheUsage";
+import { parseUsageCost } from "./usage_cost";
+import { buildPlaygroundHeaders, type CustomHeaders } from "./request_headers";
+import { buildMcpToolBlocks, type BuildMcpToolBlocksArgs } from "./mcp_tool_blocks";
 import type { MCPEvent } from "@/components/mcp_tools/types";
 import { MCPServer, MCPToolset } from "@/components/mcp_tools/types";
 import {
@@ -84,6 +87,7 @@ export async function makeOpenAIResponsesRequest(
   mcpToolsets?: MCPToolset[],
   streamingEnabled: boolean = true,
   onTotalLatency?: (latency: number) => void,
+  customHeaders?: CustomHeaders,
 ) {
   if (!accessToken) {
     throw new Error("Virtual Key is required");
@@ -99,12 +103,8 @@ export async function makeOpenAIResponsesRequest(
     console.log = function () {};
   }
 
-  const proxyBaseUrl = customBaseUrl || getProxyBaseUrl();
-  // Prepare headers with tags and trace ID
-  const headers: Record<string, string> = {};
-  if (tags && tags.length > 0) {
-    headers["x-litellm-tags"] = tags.join(",");
-  }
+  const proxyBaseUrl = customBaseUrl || getGatewayBaseUrl();
+  const headers = buildPlaygroundHeaders(tags, customHeaders);
 
   const client = new openai.OpenAI({
     apiKey: accessToken,
@@ -137,50 +137,13 @@ export async function makeOpenAIResponsesRequest(
     });
 
     // Build tools array
-    const tools: any[] = [];
-
-    // Add MCP servers if selected
-    if (selectedMCPServers && selectedMCPServers.length > 0) {
-      if (selectedMCPServers.includes("__all__")) {
-        // All MCP Servers selected
-        tools.push({
-          type: "mcp",
-          server_label: "litellm",
-          server_url: `${proxyBaseUrl}/mcp`,
-          require_approval: "never",
-        });
-      } else {
-        // Individual servers/toolsets selected - create one entry per item
-        selectedMCPServers.forEach((serverId) => {
-          if (serverId.startsWith("toolset:")) {
-            // Toolset: same /{name}/mcp pattern as individual servers
-            const toolsetId = serverId.slice("toolset:".length);
-            const toolset = mcpToolsets?.find((t) => t.toolset_id === toolsetId);
-            const toolsetName = toolset?.toolset_name || toolsetId;
-            tools.push({
-              type: "mcp",
-              server_label: toolsetName,
-              server_url: `${proxyBaseUrl}/mcp/${encodeURIComponent(toolsetName)}`,
-              require_approval: "never",
-            });
-          } else {
-            const server = mcpServers?.find((s) => s.server_id === serverId);
-            // Use server_name for both routing and labelling. server_name is the
-            // unique registered identifier; aliases can collide across servers.
-            const routeName = server?.server_name || serverId;
-            const allowedTools = mcpServerToolRestrictions?.[serverId] || [];
-
-            tools.push({
-              type: "mcp",
-              server_label: routeName, // unique per request — collisions cause silent tool-routing failures
-              server_url: `${proxyBaseUrl}/mcp/${encodeURIComponent(routeName)}`,
-              require_approval: "never",
-              ...(allowedTools.length > 0 ? { allowed_tools: allowedTools } : {}),
-            });
-          }
-        });
-      }
-    }
+    const mcpSelection: BuildMcpToolBlocksArgs = {
+      selectedMCPServers,
+      mcpServers,
+      mcpToolsets,
+      mcpServerToolRestrictions,
+    };
+    const tools: any[] = buildMcpToolBlocks(mcpSelection);
 
     // Add code_interpreter tool if enabled (OpenAI auto-creates container)
     if (codeInterpreterEnabled) {
@@ -311,8 +274,9 @@ export async function makeOpenAIResponsesRequest(
               usageData.reasoningTokens = reasoningTokens;
             }
 
-            if (usage.cost !== undefined && usage.cost !== null) {
-              usageData.cost = Number(usage.cost);
+            const parsedCost = parseUsageCost(usage.cost);
+            if (parsedCost !== undefined) {
+              usageData.cost = parsedCost;
             }
 
             onUsageData(usageData, mcpToolUsed);

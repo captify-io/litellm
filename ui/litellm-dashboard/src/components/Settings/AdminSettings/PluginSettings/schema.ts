@@ -1,4 +1,4 @@
-import { z } from "zod/v4";
+import { z } from "zod";
 
 const IPV4 = "(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d|\\d)(?:\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d|\\d)){3}";
 const SEG = "[a-fA-F\\d]{1,4}";
@@ -22,22 +22,7 @@ const URL_RULE_PATTERN = new RegExp(
   "i",
 );
 
-export function safePluginUrl(value: string): string | undefined {
-  try {
-    const url = new URL(value);
-    const webProtocol = url.protocol === "https:" || url.protocol === "http:";
-    const withoutCredentials = !url.username && !url.password;
-    if (webProtocol && withoutCredentials) {
-      return url.href;
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
-const isUrl = (value: string): boolean =>
-  value.length <= 2048 && URL_RULE_PATTERN.test(value) && safePluginUrl(value) !== undefined;
+const isUrl = (value: string): boolean => value.length <= 2048 && URL_RULE_PATTERN.test(value);
 
 const pluginShape = {
   name: z.string().min(1, "Required"),

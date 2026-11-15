@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import openai from "openai";
 import { makeOpenAIResponsesRequest } from "./responses_api";
 import { MessageType } from "../chat_ui/types";
 import type { TokenUsage } from "../chat_ui/ResponseMetrics";
 
 vi.mock("@/components/networking", () => ({
-  getProxyBaseUrl: vi.fn(() => "https://example.com"),
+  getProxyBaseUrl: vi.fn(() => "https://backend.example.com"),
+  getGatewayBaseUrl: vi.fn(() => "https://gateway.example.com"),
 }));
 
 const mockResponsesCreate = vi.fn();
@@ -16,7 +18,7 @@ const mockClient = {
 
 vi.mock("openai", () => ({
   default: {
-    OpenAI: vi.fn(function MockOpenAI() {
+    OpenAI: vi.fn(function () {
       return mockClient;
     }),
   },
@@ -58,6 +60,7 @@ describe("responses_api", () => {
   it("should send a basic responses request", async () => {
     await makeOpenAIResponsesRequest(messages, mockUpdateTextUI, "gpt-4", "test-token");
 
+    expect(openai.OpenAI).toHaveBeenCalledWith(expect.objectContaining({ baseURL: "https://gateway.example.com" }));
     expect(mockResponsesCreate).toHaveBeenCalledTimes(1);
     expect(mockResponsesCreate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -134,6 +137,46 @@ describe("responses_api", () => {
     expect(onResponseId).toHaveBeenCalledWith("resp_456");
     expect(onTimingData).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [["__all__"], [], [{ server_label: "litellm", server_url: "litellm_proxy/mcp" }]],
+    [
+      ["server-1"],
+      [{ server_id: "server-1", server_name: "my server" }],
+      [{ server_label: "my server", server_url: "litellm_proxy/mcp/my server" }],
+    ],
+  ])(
+    "sends MCP selection %j as gateway references the proxy runs for any model",
+    async (selected, servers, expected) => {
+      await makeOpenAIResponsesRequest(
+        messages,
+        mockUpdateTextUI,
+        "gemini-pro",
+        "test-token",
+        undefined, // tags
+        undefined, // signal
+        undefined, // onReasoningContent
+        undefined, // onTimingData
+        undefined, // onUsageData
+        undefined, // traceId
+        undefined, // vector_store_ids
+        undefined, // guardrails
+        undefined, // policies
+        selected,
+        undefined, // previousResponseId
+        undefined, // onResponseId
+        undefined, // onMCPEvent
+        undefined, // codeInterpreterEnabled
+        undefined, // onCodeInterpreterResult
+        undefined, // customBaseUrl
+        servers as never,
+      );
+
+      expect(mockResponsesCreate.mock.calls[0][0].tools).toEqual(
+        expected.map((tool) => ({ type: "mcp", require_approval: "never", ...tool })),
+      );
+    },
+  );
 
   it("should report total latency in both streaming and non-streaming modes", async () => {
     const onTotalLatency = vi.fn();
@@ -216,6 +259,64 @@ describe("responses_api", () => {
   });
 
   it("should omit cost when the proxy reports none", async () => {
+    const onUsageData = vi.fn();
+
+    await makeOpenAIResponsesRequest(
+      messages,
+      mockUpdateTextUI,
+      "gpt-4",
+      "test-token",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onUsageData,
+    );
+
+    expect(onUsageData).toHaveBeenCalledWith(expect.not.objectContaining({ cost: expect.anything() }), "");
+  });
+
+  it("should omit cost when the proxy reports a non-numeric cost", async () => {
+    async function* streamWithNonNumericCost() {
+      yield {
+        type: "response.completed",
+        response: {
+          id: "resp_non_numeric_cost",
+          usage: { output_tokens: 12, input_tokens: 12, total_tokens: 24, cost: "not-a-number" },
+        },
+      };
+    }
+    mockResponsesCreate.mockResolvedValueOnce(streamWithNonNumericCost());
+
+    const onUsageData = vi.fn();
+
+    await makeOpenAIResponsesRequest(
+      messages,
+      mockUpdateTextUI,
+      "gpt-4",
+      "test-token",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onUsageData,
+    );
+
+    expect(onUsageData).toHaveBeenCalledWith(expect.not.objectContaining({ cost: expect.anything() }), "");
+  });
+
+  it("should omit cost when the proxy reports a blank cost", async () => {
+    async function* streamWithBlankCost() {
+      yield {
+        type: "response.completed",
+        response: {
+          id: "resp_blank_cost",
+          usage: { output_tokens: 12, input_tokens: 12, total_tokens: 24, cost: "  " },
+        },
+      };
+    }
+    mockResponsesCreate.mockResolvedValueOnce(streamWithBlankCost());
+
     const onUsageData = vi.fn();
 
     await makeOpenAIResponsesRequest(
@@ -340,18 +441,19 @@ describe("responses_api", () => {
 
     const callArgs = mockResponsesCreate.mock.calls[0][0];
     expect(callArgs.tool_choice).toBe("auto");
+    expect(openai.OpenAI).toHaveBeenCalledWith(expect.objectContaining({ baseURL: "https://gateway.example.com" }));
     expect(callArgs.tools).toEqual([
       {
         type: "mcp",
         server_label: "Alpha",
-        server_url: "https://example.com/mcp/Alpha",
+        server_url: "litellm_proxy/mcp/Alpha",
         require_approval: "never",
         allowed_tools: ["toolA"],
       },
       {
         type: "mcp",
         server_label: "Beta",
-        server_url: "https://example.com/mcp/Beta",
+        server_url: "litellm_proxy/mcp/Beta",
         require_approval: "never",
         allowed_tools: ["toolB", "toolC"],
       },
@@ -551,5 +653,48 @@ describe("responses_api response cache", () => {
     );
 
     expect(onUsageData).toHaveBeenCalledWith(expect.not.objectContaining({ servedFromResponseCache: true }), "");
+  });
+});
+
+describe("responses_api custom headers", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("sends custom headers alongside the tags header on the OpenAI client", async () => {
+    mockResponsesCreate.mockReturnValueOnce(nonStreamingResponse({ id: "resp_1", output: [] }));
+
+    await makeOpenAIResponsesRequest(
+      [{ role: "user", content: "Hello" }],
+      vi.fn(),
+      "gpt-4",
+      "test-token",
+      ["team-a"],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      { "anthropic-beta": "context-1m-2025-08-07" },
+    );
+
+    expect(vi.mocked(openai.OpenAI).mock.calls[0][0]).toMatchObject({
+      defaultHeaders: { "x-litellm-tags": "team-a", "anthropic-beta": "context-1m-2025-08-07" },
+    });
   });
 });

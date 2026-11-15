@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Final, TypeAlias
 
-from pydantic import BaseModel
 from typing_extensions import assert_never
 
 from litellm._logging import verbose_proxy_logger
+from litellm.types.llms.base import LiteLLMBaseModel
 
 IAM_TOKEN_DB_AUTH_ENV_VAR: Final = "IAM_TOKEN_DB_AUTH"
 AZURE_POSTGRESQL_AUTH_ENV_VAR: Final = "AZURE_POSTGRESQL_AUTH"
@@ -98,7 +98,7 @@ class IAMEndpoint:
     name: str
     schema: str | None = None
 
-    def build_url(self, token: str, *, previous_url: str | None = None) -> str:
+    def build_url(self, token: str) -> str:
         """Assemble the connection URL, inserting ``token`` verbatim as the password.
 
         User, database name, and schema are normalized rather than encoded outright,
@@ -110,15 +110,9 @@ class IAMEndpoint:
         base: Final = (
             f"postgresql://{_normalize_quote(self.user)}:{token}@{self.host}:{self.port}/{_normalize_quote(self.name)}"
         )
-        previous_query: Final = urllib.parse.urlsplit(previous_url or "").query
-        retained: Final = tuple(
-            f"{_quote(key)}={_quote(value)}"
-            for key, value in urllib.parse.parse_qsl(previous_query, keep_blank_values=True)
-            if key != "schema" or not self.schema
-        )
-        schema: Final = (f"schema={_normalize_quote(self.schema)}",) if self.schema else ()
-        query: Final = "&".join(schema + retained)
-        return f"{base}?{query}" if query else base
+        if not self.schema:
+            return base
+        return f"{base}?schema={_normalize_quote(self.schema)}"
 
 
 def parse_iam_endpoint_from_url(url: str) -> IAMEndpoint:
@@ -147,6 +141,13 @@ def parse_iam_endpoint_from_url(url: str) -> IAMEndpoint:
 @dataclass(frozen=True, slots=True)
 class RdsIamTokenAuth:
     """AWS RDS IAM auth: a SigV4-presigned token minted from the ambient AWS credentials."""
+
+    region: str | None = None
+
+    @classmethod
+    def from_env(cls, *, read_replica: bool = False) -> "RdsIamTokenAuth":
+        env_var: Final = "AWS_RDS_READ_REPLICA_REGION" if read_replica else "AWS_RDS_REGION"
+        return cls(region=os.getenv(env_var, "").strip() or None)
 
     @property
     def label(self) -> str:
@@ -185,7 +186,9 @@ def mint_database_token(auth: DatabaseTokenAuth, endpoint: IAMEndpoint) -> str:
         case RdsIamTokenAuth():
             from litellm.proxy.auth.rds_iam_token import generate_iam_auth_token
 
-            return generate_iam_auth_token(db_host=endpoint.host, db_port=endpoint.port, db_user=endpoint.user)
+            return generate_iam_auth_token(
+                db_host=endpoint.host, db_port=endpoint.port, db_user=endpoint.user, region=auth.region
+            )
         case AzureEntraTokenAuth():
             return _quote(auth.token_provider())
         case _:
@@ -223,7 +226,7 @@ def _parse_rds_token_expiration(token: str) -> datetime | None:
         return None
 
 
-class _EntraAccessTokenClaims(BaseModel):
+class _EntraAccessTokenClaims(LiteLLMBaseModel):
     exp: int
 
 
@@ -257,20 +260,23 @@ def build_azure_entra_token_provider() -> Callable[[], str]:
     return get_azure_ad_token_provider(azure_scope=AZURE_POSTGRESQL_SCOPE)
 
 
-def build_database_token_auth(*, iam_token_db_auth: bool, azure_postgresql_auth: bool) -> DatabaseTokenAuth | None:
+def build_database_token_auth(
+    *, iam_token_db_auth: bool, azure_postgresql_auth: bool, read_replica: bool = False
+) -> DatabaseTokenAuth | None:
     """Pick the token strategy the two toggles ask for, or None when neither is on."""
     if iam_token_db_auth and azure_postgresql_auth:
         raise RuntimeError(CONFLICTING_TOKEN_AUTH_MESSAGE)
     if azure_postgresql_auth:
         return AzureEntraTokenAuth(token_provider=build_azure_entra_token_provider())
     if iam_token_db_auth:
-        return RdsIamTokenAuth()
+        return RdsIamTokenAuth.from_env(read_replica=read_replica)
     return None
 
 
-def resolve_database_token_auth() -> DatabaseTokenAuth | None:
+def resolve_database_token_auth(*, read_replica: bool = False) -> DatabaseTokenAuth | None:
     """Resolve the token strategy from the environment, raising when both toggles are set."""
     return build_database_token_auth(
+        read_replica=read_replica,
         iam_token_db_auth=token_auth_flag_enabled(
             os.getenv(IAM_TOKEN_DB_AUTH_ENV_VAR), env_var=IAM_TOKEN_DB_AUTH_ENV_VAR
         ),
