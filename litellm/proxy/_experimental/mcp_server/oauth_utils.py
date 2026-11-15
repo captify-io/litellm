@@ -2,11 +2,16 @@
 (BYOK + discoverable / pass-through OAuth proxy)."""
 
 import os
+import re
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import TYPE_CHECKING, Any, Final, NoReturn
-from urllib.parse import ParseResult, urlparse, urlsplit, urlunparse, urlunsplit
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, NoReturn
+from urllib.parse import ParseResult, parse_qsl, urlencode, urlparse, urlsplit, urlunparse, urlunsplit
 
 from fastapi import HTTPException, Request
+from pydantic import TypeAdapter
 from starlette.types import Scope
 
 from litellm._logging import verbose_logger
@@ -15,7 +20,11 @@ from litellm.proxy._experimental.mcp_server.auth.token_endpoint_auth import (
     build_token_endpoint_client_auth,
     normalize_token_endpoint_auth_method,
 )
+from litellm.proxy._experimental.mcp_server.outbound_credentials.sso_assertion_store import (
+    GOOGLE_REFRESH_TOKEN_PARAMS,
+)
 from litellm.proxy.auth.ip_address_utils import IPAddressUtils
+from litellm.proxy.middleware.per_request_root_path_middleware import get_request_root_path
 
 if TYPE_CHECKING:
     from litellm.types.mcp_server.mcp_server_manager import MCPServer
@@ -53,6 +62,9 @@ _DEFAULT_NATIVE_REDIRECT_URIS: Final[list[str]] = [
     "cursor://anysphere.cursor-mcp/oauth/callback",
 ]
 
+_GOOGLE_AUTHORIZATION_HOSTS: Final = frozenset({"accounts.google.com"})
+_GOOGLE_OFFLINE_ACCESS_PARAMS: Final = GOOGLE_REFRESH_TOKEN_PARAMS
+
 _warned_invalid_proxy_base_url: str | None = None
 
 
@@ -60,7 +72,7 @@ def _oauth_invalid_request(
     error_description: str,
     *,
     hint: str | None = None,
-    **extra: Any,
+    **extra: object,
 ) -> NoReturn:
     """Raise ``invalid_request`` (RFC 6749) with a debuggable description.
 
@@ -68,7 +80,7 @@ def _oauth_invalid_request(
     ``invalid_request``; ``error_description`` and ``hint`` explain what
     failed and how to fix it (e.g. reverse-proxy / PROXY_BASE_URL issues).
     """
-    detail: Final[dict[str, Any]] = {
+    detail: Final[dict[str, object]] = {
         "error": "invalid_request",
         "error_description": error_description,
     }
@@ -83,7 +95,7 @@ def _origin_label(scheme: str, netloc: str) -> str:
     return f"{scheme}://{netloc}" if netloc else f"{scheme}://"
 
 
-def _redact_mcp_resource_url(url: str | None) -> str | None:
+def redact_mcp_resource_url(url: str | None) -> str | None:
     """Reduce an MCP server URL to its origin (scheme + host + port) for logging.
 
     Everything else is dropped: userinfo (``user:pass@``), the query string, the
@@ -106,6 +118,62 @@ def _redact_mcp_resource_url(url: str | None) -> str | None:
     return urlunsplit((parts.scheme, netloc, "", "", "")) or None
 
 
+_redact_mcp_resource_url: Final = redact_mcp_resource_url
+
+
+def build_upstream_authorize_url(authorization_url: str, params: Mapping[str, str]) -> str:
+    parsed: Final = urlparse(authorization_url)
+    provider_defaults: Final = (
+        _GOOGLE_OFFLINE_ACCESS_PARAMS
+        if parsed.hostname in _GOOGLE_AUTHORIZATION_HOSTS
+        else MappingProxyType[str, str]({})
+    )
+    merged: Final = {**provider_defaults, **dict(parse_qsl(parsed.query)), **params}
+    return urlunparse(parsed._replace(query=urlencode(merged)))
+
+
+MCP_WILDCARD_SCOPE: Final = "mcp_all"
+
+
+def asks_for_wildcard(scope: str | None) -> bool:
+    return MCP_WILDCARD_SCOPE in (scope or "").split()
+
+
+def grant_covers_scopes(
+    granted: tuple[str, ...], requested: tuple[str, ...], server_scopes: Callable[[], frozenset[str]]
+) -> bool:
+    """Whether a stored grant holds every requested scope. A non-empty grant holds the wildcard scope, which a
+    provider grants as granular scopes in its place. A grant stored as one comma-joined token, the form Slack and
+    GitHub reply with, counts as its parts only when every part is a requested or server scope."""
+    held: Final = frozenset((*granted, MCP_WILDCARD_SCOPE)) if granted else frozenset[str]()
+    if all(scope in held for scope in requested):
+        return True
+    if len(granted) != 1 or "," not in granted[0]:
+        return False
+    parts: Final = frozenset(granted[0].split(","))
+    known: Final = frozenset(requested) | server_scopes()
+    return parts <= known and all(scope in held or scope in parts for scope in requested)
+
+
+_PUBLISHED_SCOPES: Final = TypeAdapter[tuple[str, ...] | None](tuple[str, ...] | None)
+
+
+def server_scope_names(server: "MCPServer | None") -> frozenset[str]:
+    if server is None:
+        return frozenset()
+    published: Final = (
+        _PUBLISHED_SCOPES.validate_python(server.authorization_server_metadata.get("scopes_supported"))
+        if server.authorization_server_metadata is not None
+        else None
+    )
+    return frozenset((*(server.scopes or ()), *(published or ())))
+
+
+def proxy_base_url_from_env() -> str | None:
+    """The gateway's fixed public URL from ``PROXY_BASE_URL``, ``None`` when unset or malformed."""
+    return _resolve_proxy_base_url_env()
+
+
 def _resolve_proxy_base_url_env() -> str | None:
     global _warned_invalid_proxy_base_url
     configured: Final = os.environ.get("PROXY_BASE_URL", "").strip()
@@ -124,6 +192,71 @@ def _resolve_proxy_base_url_env() -> str | None:
         )
         _warned_invalid_proxy_base_url = configured
     return None
+
+
+def configured_proxy_base_url() -> str | None:
+    """The operator-configured public origin (``PROXY_BASE_URL``), or None when the gateway only
+    knows itself through the current request's Host and forwarded headers."""
+    return _resolve_proxy_base_url_env()
+
+
+CIMD_METADATA_PATH: Final = "/oauth/client-metadata.json"
+
+
+def get_cimd_document_url() -> str | None:
+    try:
+        configured: Final = _resolve_proxy_base_url_env()
+        parsed: Final = urlparse(configured or "")
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        return None
+    return f"{configured}{CIMD_METADATA_PATH}"
+
+
+def _can_use_cimd(server: "MCPServer") -> bool:
+    return (
+        server.is_gateway_managed_oauth2
+        and server.needs_user_oauth_token
+        and not server.client_id
+        and not server.client_secret
+        and server.token_endpoint_auth_method != "client_secret_basic"
+    )
+
+
+def needs_cimd_discovery(server: "MCPServer") -> bool:
+    """Resolve unknown client metadata support even when OAuth endpoints are configured."""
+    return (
+        getattr(server, "client_id_metadata_document_supported", False) is None
+        and _can_use_cimd(server)
+        and get_cimd_document_url() is not None
+    )
+
+
+def _deployment_prefers_cimd() -> bool:
+    from litellm.proxy.proxy_server import general_settings
+
+    return general_settings.get("mcp_prefer_client_id_metadata_document") is True
+
+
+def _dynamic_registration_takes_precedence(server: "MCPServer") -> bool:
+    return server.effective_registration_url is not None and not _deployment_prefers_cimd()
+
+
+def get_cimd_client_id(server: "MCPServer") -> str | None:
+    if getattr(server, "client_id_metadata_document_supported", False) is not True or not _can_use_cimd(server):
+        return None
+    if _dynamic_registration_takes_precedence(server):
+        return None
+    return get_cimd_document_url()
+
+
+BYOK_RESOURCE_METADATA_PATH: Final = "/v1/mcp/oauth/protected-resource"
+
+
+def get_byok_www_authenticate() -> str:
+    base_url: Final = _resolve_proxy_base_url_env() or get_request_root_path().rstrip("/")
+    return f'Bearer resource_metadata="{base_url}{BYOK_RESOURCE_METADATA_PATH}"'
 
 
 def get_request_base_url(request: Request) -> str:
@@ -649,6 +782,17 @@ def canonicalize_url_identity(url: str) -> str:
     return urlunparse((scheme, netloc, parsed.path.rstrip("/"), "", "", ""))
 
 
+def oauth_client_registration_matches(
+    registered_issuer: str | None,
+    registered_url: str | None,
+    current_issuer: str | None,
+    current_url: str | None,
+) -> bool:
+    if registered_issuer and current_issuer:
+        return registered_issuer == current_issuer
+    return not registered_url or registered_url == current_url
+
+
 def canonical_resource_uri(url: str) -> str | None:
     """Canonicalize an upstream MCP server URL into an RFC 8707 resource identifier.
 
@@ -725,6 +869,7 @@ def build_upstream_oauth2_token_request(
     auth_method: object,
     client_id: str | None,
     client_secret: str | None,
+    cimd_client_id: str | None = None,
 ) -> TokenEndpointClientAuth:
     """Client auth plus the RFC 8707 ``resource`` for one upstream plain-OAuth2 token request.
 
@@ -734,12 +879,42 @@ def build_upstream_oauth2_token_request(
     authenticate as the caller's own client rather than the server's; ``resource`` always comes from
     the server, so no leg can choose or forget it.
     """
+    selected_cimd_id: Final = cimd_client_id or get_cimd_client_id(mcp_server)
     client_auth: Final = build_token_endpoint_client_auth(
-        auth_method=normalize_token_endpoint_auth_method(auth_method),
-        client_id=client_id,
-        client_secret=client_secret,
+        auth_method=None if selected_cimd_id else normalize_token_endpoint_auth_method(auth_method),
+        client_id=selected_cimd_id or client_id,
+        client_secret=None if selected_cimd_id else client_secret,
     )
     resource: Final = resolve_upstream_resource(mcp_server)
     if not resource:
         return client_auth
     return TokenEndpointClientAuth(headers=client_auth.headers, body={**client_auth.body, "resource": resource})
+
+
+UPSTREAM_SCOPE_PREFIX: Final = "litellm:mcp_scope:"
+
+
+@dataclass(frozen=True, slots=True)
+class UpstreamScope:
+    server_id: str
+    permission: str
+
+
+def encode_upstream_scope(server_id: str, permission: str) -> str:
+    return f"{UPSTREAM_SCOPE_PREFIX}{server_id.encode().hex()}:{permission.encode().hex()}"
+
+
+def decode_upstream_scope(token: str) -> UpstreamScope | None:
+    encoded: Final = token.removeprefix(UPSTREAM_SCOPE_PREFIX).split(":")
+    if not token.startswith(UPSTREAM_SCOPE_PREFIX) or len(encoded) != 2:
+        return None
+    try:
+        server_id: Final = bytes.fromhex(encoded[0]).decode()
+        permission: Final = bytes.fromhex(encoded[1]).decode()
+    except (ValueError, UnicodeError):
+        return None
+    if not server_id or re.fullmatch(r"[!#-\[\]-~]+", permission) is None:
+        return None
+    if encode_upstream_scope(server_id, permission) != token:
+        return None
+    return UpstreamScope(server_id, permission)

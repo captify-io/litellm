@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from litellm.integrations.opentelemetry import OpenTelemetry, OpenTelemetryConfig
-from litellm.llms.custom_httpx.http_handler import _get_httpx_client
+from litellm.llms.custom_httpx.http_handler import get_httpx_client
 
 
 @dataclass
@@ -99,18 +99,14 @@ class AgentOps(OpenTelemetry):
             "Connection": "keep-alive",
         }
 
-        client: Final = _get_httpx_client()
-        try:
-            response: Final = client.post(
-                url=auth_endpoint,
-                headers=headers,
-                json={"api_key": api_key},
-                timeout=10,
-            )
+        response: Final = get_httpx_client().post(
+            url=auth_endpoint,
+            headers=headers,
+            json={"api_key": api_key},
+            timeout=10,
+        )
 
-            if response.status_code != 200:
-                raise Exception(f"Failed to fetch auth token: {response.text}")
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch auth token: {response.text}")
 
-            return response.json()
-        finally:
-            client.close()
+        return response.json()

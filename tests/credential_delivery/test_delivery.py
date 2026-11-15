@@ -519,7 +519,9 @@ class Delivery(unittest.TestCase):
     def test_password_deployment_cannot_disable_existing_iam(self):
         previous = {**self.database_settings(), "IAM_TOKEN_DB_AUTH": "True"}
         for flag in (None, "False", "True"):
-            updates = {key: value for key, value in previous.items() if key != "IAM_TOKEN_DB_AUTH"}
+            updates = {
+                key: value for key, value in previous.items() if key not in ("IAM_TOKEN_DB_AUTH", "DATABASE_PASSWORD")
+            }
             if flag is not None:
                 updates["IAM_TOKEN_DB_AUTH"] = flag
             with self.subTest(flag=flag), self.assertRaises(ValueError):
@@ -527,6 +529,22 @@ class Delivery(unittest.TestCase):
         self.env_path.write_text("IAM_TOKEN_DB_AUTH=True\n")
         with self.assertRaises(ValueError):
             CI.runtime_secret(self.binding, self.env)
+
+    def test_password_deployment_switches_from_iam_only_when_explicit_with_password(self):
+        previous = {
+            **self.database_settings(),
+            "IAM_TOKEN_DB_AUTH": "True",
+            "DATABASE_AWS_ROLE_ARN": "arn:aws-us-gov:iam::123456789012:role/db",
+            "DATABASE_AWS_REGION_NAME": "us-gov-west-1",
+            "DATABASE_URL": "postgresql://iam_user@db.example:5432/litellm?sslmode=require",
+        }
+        updates = {**previous, "IAM_TOKEN_DB_AUTH": "False", "DATABASE_PASSWORD": "secret", "DATABASE_USER": "app"}
+        result = TARGET.database_environment(previous, updates, None, "us-gov-west-1")
+        for key in ("DATABASE_AWS_ROLE_ARN", "DATABASE_AWS_REGION_NAME", "DATABASE_URL", "DATABASE_URL_READ_REPLICA"):
+            self.assertNotIn(key, result)
+        self.assertEqual(result["IAM_TOKEN_DB_AUTH"], "False")
+        self.assertEqual(result["DATABASE_PASSWORD"], "secret")
+        self.assertEqual(result["DATABASE_USER"], "app")
 
     def test_configuration_merge_preserves_limits_and_nonselected_environment(self):
         old = self.old_container()

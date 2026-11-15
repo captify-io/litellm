@@ -114,6 +114,20 @@ def database_environment(
 ) -> dict[str, str]:
     merged: Final = dict(updates)
     if identity is None:
+        if (
+            previous.get("IAM_TOKEN_DB_AUTH", "").lower() not in ("", "false", "0", "no", "off")
+            and merged.get("IAM_TOKEN_DB_AUTH", "").lower() in ("false", "0", "no", "off")
+            and merged.get("DATABASE_PASSWORD")
+        ):
+            # A reviewed switch from RDS IAM to password authentication: drop the IAM-only
+            # settings and the token URLs so the runtime assembles them from DATABASE_PASSWORD.
+            iam_only: Final = {
+                "DATABASE_AWS_ROLE_ARN",
+                "DATABASE_AWS_REGION_NAME",
+                "DATABASE_URL",
+                "DATABASE_URL_READ_REPLICA",
+            }
+            return {key: value for key, value in merged.items() if key not in iam_only}
         if any(
             source.get("IAM_TOKEN_DB_AUTH", "").lower() not in ("", "false", "0", "no", "off")
             for source in (previous, updates)

@@ -6,7 +6,6 @@ tests
 .git
 .devcontainer
 *.tgz
-!ui/litellm-dashboard/vendor/braces-depth-guard/*.tgz
 log.txt
 docker/Dockerfile.*
 
@@ -58,4 +57,5 @@ litellm/rust_bridge/_native*.so
 .env
 .env.local
 
+# Captify deploy tooling (GitLab CI only, never in the image)
 /deploy/credential-delivery/
