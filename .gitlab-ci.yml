@@ -56,9 +56,16 @@ build-image:
   script:
     - LITELLM_VERSION=$(grep '^version' pyproject.toml | head -1 | sed -E 's/version\s*=\s*"([^"]+)"/\1/')
     - echo "$LITELLM_VERSION" > litellm_version.txt
+    # Wolfi base images pin exact package versions in /etc/apk/world, so `apk upgrade` cannot
+    # move past the base the Dockerfile pins. Build from the current wolfi-base digest instead.
+    - docker pull -q cgr.dev/chainguard/wolfi-base:latest
+    - WOLFI_BASE=$(docker image inspect cgr.dev/chainguard/wolfi-base:latest --format '{{index .RepoDigests 0}}')
+    - 'case "$WOLFI_BASE" in cgr.dev/chainguard/wolfi-base@sha256:*) echo "wolfi-base: $WOLFI_BASE" ;; *) exit 1 ;; esac'
     - |
       docker buildx build \
         --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --build-arg LITELLM_BUILD_IMAGE="$WOLFI_BASE" \
+        --build-arg LITELLM_RUNTIME_IMAGE="$WOLFI_BASE" \
         --cache-from "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         --cache-from "$CI_REGISTRY_IMAGE:latest" \
         -f docker/Dockerfile.non_root \
